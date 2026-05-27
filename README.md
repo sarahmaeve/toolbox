@@ -23,15 +23,17 @@ cmd/
 Each package is independently consumable. Dependencies flow downward:
 
 ```
-   bridge       (HTTPS layer)               toolbox-pdf
-    │  ╲                                        │
-    │   ╲                                       ▼
-    ▼    ▼                              pdf  ←  pdfclean
- messagestore  certs                    (stdlib-only PDF stack)
+   bridge        messagetypes              toolbox-pdf
+    │              │                           │
+    │       ┌──────┘                           ▼
+    ▼       ▼                             pdf    pdfclean
+   messagestore                           (stdlib-only PDF stack; independent)
     │
     ▼
-  schema                                 mcp (independent; uses schema)
+   schema  ◀── mcp                        certs (stdlib-only; CA bootstrap)
 ```
+
+`certs` is consumed by the `toolbox-bridge` binary (not by `pkg/bridge`); `pdf` and `pdfclean` are paired by the `toolbox-pdf` binary but neither imports the other.
 
 ## What you get
 
@@ -186,8 +188,8 @@ That error is the documentation. An agent that picks the wrong value self-correc
 The self-documenting-error contract extends to ingest-layer rejections too:
 
 ```
-ErrUnknownRole: "imposter"; allowed roles: [agent, orchestrator, user]
-ErrUnknownType: "task.completed"; registered types: [task]
+unknown role: "imposter"; allowed roles: [agent, orchestrator, user]
+unknown message type: "task.completed"; registered types: [task]
 ```
 
 An agent encountering either error sees the legitimate vocabulary inline and corrects on the next call.
@@ -233,13 +235,9 @@ On Linux, the equivalent is a `~/.config/systemd/user/toolbox-bridge.service` un
 make check        gofmt + go vet + go test -race ./...
 make test         unit tests, no race
 make test-race    unit tests with -race
-make build        ./bin/{toolbox-bridge,toolbox-mcp} with version stamping
+make build        ./bin/{toolbox-bridge,toolbox-mcp,toolbox-pdf} with version stamping
 make doctor       run toolbox-bridge doctor against this machine
 make clean        rm ./bin
 ```
 
 All packages run race-clean. Integration tests in `pkg/bridge` exercise the full HTTP round-trip against a real `messagestore.Store` via `httptest`.
-
-## License
-
-MIT, same as the parent project.
