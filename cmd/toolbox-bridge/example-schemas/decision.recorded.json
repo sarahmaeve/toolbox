@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "question":  {"type": "string"},
+    "decision":  {"type": "string"},
+    "rationale": {"type": "string"},
+    "tradeoffs": {"type": "array"}
+  },
+  "required": ["question", "decision", "rationale"],
+  "additionalProperties": false
+}

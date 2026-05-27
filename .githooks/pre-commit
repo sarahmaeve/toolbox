@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== pre-commit: gofmt ==="
+
+# Staged .go files only (Added/Copied/Modified/Renamed — not Deleted).
+# -z + read -d handles spaces/newlines in filenames safely.
+STAGED_GO=()
+while IFS= read -r -d '' f; do
+    STAGED_GO+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.go')
+
+if [ ${#STAGED_GO[@]} -eq 0 ]; then
+    echo "OK (no staged .go files)"
+    exit 0
+fi
+
+# Check staged *content*, not the working tree. A file can be staged
+# formatted and then edited to be unformatted — we want to pass on
+# what's actually being committed.
+FAIL=0
+UNFMT=()
+for f in "${STAGED_GO[@]}"; do
+    # git show :path reads the staged blob
+    if ! git show ":$f" | gofmt -l > /dev/null 2>&1; then
+        # gofmt exits non-zero on parse errors — capture and report
+        ERR=$(git show ":$f" | gofmt -l 2>&1 >/dev/null)
+        echo "ERROR: $f failed to parse:"
+        echo "$ERR"
+        FAIL=1
+        continue
+    fi
+    # gofmt -l prints the filename (here "<standard input>") if unformatted
+    if [ -n "$(git show ":$f" | gofmt -l)" ]; then
+        UNFMT+=("$f")
+    fi
+done
+
+if [ ${#UNFMT[@]} -gt 0 ]; then
+    echo "ERROR: The following staged files are not gofmt'd:"
+    printf '  %s\n' "${UNFMT[@]}"
+    echo "Run: gofmt -w ${UNFMT[*]}"
+    echo "Then: git add <files> && git commit"
+    FAIL=1
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+    exit 1
+fi
+
+echo "OK"
+
+echo "=== pre-commit: go vet ==="
+go vet ./...
+echo "OK"
+
+echo "=== pre-commit: go test ==="
+go test ./...
+echo "OK"
+
+echo "=== pre-commit: all checks passed ==="

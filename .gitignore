@@ -30,3 +30,18 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Makefile build output
+bin/
+
+# Stray top-level binaries (anchored to repo root so cmd/toolbox-* source dirs
+# are not affected). The Makefile sends builds to bin/ above; this catches
+# `go build ./cmd/toolbox-*` invocations run from the repo root.
+/toolbox-bridge
+/toolbox-mcp
+
+# Local MCP config (use .mcp.json.example as the template)
+.mcp.json
+
+# Project-local Claude Code instructions; not part of the public surface
+CLAUDE.md

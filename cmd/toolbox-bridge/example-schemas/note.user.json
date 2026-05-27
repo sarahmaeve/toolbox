@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "body":    {"type": "string"},
+    "tags":    {"type": "array"},
+    "context": {"type": "string"}
+  },
+  "required": ["body"],
+  "additionalProperties": false
+}

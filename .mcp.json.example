@@ -1,0 +1,14 @@
+{
+  "_comment_for_humans": "Copy this file to .mcp.json in any project where you want Claude Code to expose the toolbox-mcp tools. Replace YOUR_USERNAME below with the actual macOS user (Claude Code does not expand ~ or $HOME). Verify the toolbox-mcp binary path matches your GOBIN (run `which toolbox-mcp` to check).",
+  "mcpServers": {
+    "toolbox": {
+      "command": "/Users/YOUR_USERNAME/go/bin/toolbox-mcp",
+      "args": [
+        "--db", "/Users/YOUR_USERNAME/.toolbox/messages.db",
+        "--schemas-dir", "/Users/YOUR_USERNAME/.toolbox/schemas",
+        "--allowed-roles", "user,agent,orchestrator",
+        "--log", "/Users/YOUR_USERNAME/.toolbox/log/mcp.log"
+      ]
+    }
+  }
+}
