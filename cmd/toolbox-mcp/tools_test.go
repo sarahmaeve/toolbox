@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -300,18 +302,64 @@ func TestListTasks_StatusFilterNarrows(t *testing.T) {
 
 func TestListTasks_StatusFilterEnumEnforced(t *testing.T) {
 	t.Parallel()
-	_, tools := newStoreWithBuiltins(t)
-	tool := findTool(t, tools, "list_tasks")
 
-	// The MCP framework's strict-reject validation should catch
-	// "status=banana" at the tools/call edge, but since callTool
-	// invokes Handle directly we bypass that layer here. The same
-	// path would surface as CodeSchemaViolation via the dispatcher;
-	// see pkg/mcp/server_test.go for that integration. This test
-	// asserts the bypass path is harmless (no panic, returns ok with
-	// the unfiltered result OR an internal error — either is fine).
-	resp := callTool(t, tool, map[string]any{"status": "banana"}, nil)
-	assert.NotNil(t, resp)
+	// list_tasks declares a strict status enum. An agent that passes
+	// "banana" must be told by the dispatcher (not just by Handle) that
+	// the value is rejected and which values are legal — that's how the
+	// self-documenting-error contract works for LLM clients. The
+	// previous version of this test invoked Handle directly, which
+	// bypassed the validator; this version goes through the real MCP
+	// server pipeline so the enum gate actually fires.
+	_, tools := newStoreWithBuiltins(t)
+	srv := mcp.NewServer(mcp.ServerConfig{Name: "test", Version: "0.0.1"})
+	for _, tool := range tools {
+		srv.Register(tool)
+	}
+
+	in, sin := io.Pipe()
+	sout, out := io.Pipe()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(context.Background(), in, out) }()
+	defer func() {
+		_ = sin.Close()
+		select {
+		case <-serveErr:
+		case <-time.After(2 * time.Second):
+			t.Error("server did not return after sin.Close()")
+		}
+	}()
+
+	send := func(line string) {
+		_, err := io.WriteString(sin, line+"\n")
+		require.NoError(t, err)
+	}
+	dec := json.NewDecoder(sout)
+	type rpcResp struct {
+		Result json.RawMessage `json:"result"`
+	}
+	read := func() rpcResp {
+		var r rpcResp
+		require.NoError(t, dec.Decode(&r))
+		return r
+	}
+
+	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"c","version":"v"}}}`)
+	_ = read() // initialize
+	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+
+	send(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_tasks","arguments":{"status":"banana"}}}`)
+	r := read()
+
+	// Schema validator must reject; isError=true is the protocol-level
+	// signal, and the rejection text should both name the enum field
+	// AND enumerate the legal values so an LLM client can self-correct.
+	body := string(r.Result)
+	assert.Contains(t, body, `"isError":true`)
+	assert.Contains(t, body, mcp.CodeSchemaViolation)
+	assert.Contains(t, body, "status")
+	for _, want := range []string{"new", "in-progress", "done", "abandoned"} {
+		assert.Contains(t, body, want, "rejection must enumerate legal status values")
+	}
 }
 
 func TestListTasks_LimitCaps(t *testing.T) {
