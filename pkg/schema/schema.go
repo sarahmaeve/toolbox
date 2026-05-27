@@ -36,23 +36,25 @@ type Schema struct {
 }
 
 // property carries the subset of JSON Schema constraints we actually
-// enforce for a single property: type, plus optional numeric bounds.
-// Expanding this struct is the expected path for future schema
-// features (minLength, pattern, enum) — add the parsed form here and
-// a matching branch in checkType/checkBounds.
+// enforce for a single property: type, optional numeric bounds, and
+// an optional string-valued enum.
 type property struct {
 	// typ is the JSON Schema type: "string", "boolean", "number",
 	// "integer", "object", "array", or "" if unspecified.
 	typ string
 	// minimum / maximum are the bounds for numeric types. They are
 	// silently ignored on non-numeric types (consistent with the rest
-	// of this parser's permissiveness); a schema that declares
-	// minimum on a string is a schema bug we don't currently catch.
-	// The hasX flags distinguish "not declared" from "declared as 0."
+	// of this parser's permissiveness). The hasX flags distinguish
+	// "not declared" from "declared as 0."
 	minimum    float64
 	hasMinimum bool
 	maximum    float64
 	hasMaximum bool
+	// enum is the closed set of acceptable string values. Only
+	// string-typed properties are enforced today; declaring enum on
+	// a non-string type is silently ignored, consistent with the
+	// rest of this parser's permissiveness. Nil = no constraint.
+	enum []string
 }
 
 // Violation describes one schema-validation failure. It satisfies
@@ -68,9 +70,12 @@ type Violation struct {
 	// Type names the declared JSON Schema type involved in a
 	// type-mismatch or bounds error. Empty otherwise.
 	Type string
-	// ValidFields lists every property name declared in the schema,
-	// sorted. Populated for "unknown field" and "missing required"
-	// violations so callers can render a complete remediation list.
+	// ValidFields lists the acceptable alternatives to the offending
+	// input, sorted. Populated for:
+	//   - "unknown field" / "missing required" violations: every
+	//     property name the schema declared.
+	//   - "value not in enum" violations: every value the declared
+	//     enum accepts.
 	// Empty for other violation kinds.
 	ValidFields []string
 	// Message is the human-readable description suitable for surfacing
@@ -148,9 +153,10 @@ func Parse(raw json.RawMessage) (*Schema, error) {
 // we don't recognize are silently ignored.
 func parseProperty(def json.RawMessage) *property {
 	var raw struct {
-		Type    string       `json:"type"`
-		Minimum *json.Number `json:"minimum"`
-		Maximum *json.Number `json:"maximum"`
+		Type    string          `json:"type"`
+		Minimum *json.Number    `json:"minimum"`
+		Maximum *json.Number    `json:"maximum"`
+		Enum    json.RawMessage `json:"enum"`
 	}
 	if err := json.Unmarshal(def, &raw); err != nil {
 		return &property{}
@@ -166,6 +172,16 @@ func parseProperty(def json.RawMessage) *property {
 		if f, err := raw.Maximum.Float64(); err == nil {
 			p.maximum = f
 			p.hasMaximum = true
+		}
+	}
+	if len(raw.Enum) > 0 {
+		var values []string
+		// Only string enums are supported today; an enum that contains
+		// non-string values is silently ignored (the unmarshal into
+		// []string will fail). A future extension could parse mixed
+		// enums via []json.RawMessage.
+		if err := json.Unmarshal(raw.Enum, &values); err == nil && len(values) > 0 {
+			p.enum = values
 		}
 	}
 	return p
@@ -272,6 +288,9 @@ func (s *Schema) Validate(contextName string, raw json.RawMessage) *Violation {
 				Message: fmt.Sprintf("field %q in input for %s: %s", name, contextName, err.Error()),
 			}
 		}
+		if v := checkEnum(prop, name, contextName, raw); v != nil {
+			return v
+		}
 		if err := checkBounds(prop, raw); err != nil {
 			return &Violation{
 				Field:   name,
@@ -356,6 +375,45 @@ func checkType(declaredType string, raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// checkEnum enforces that a string-typed field's value lies in the
+// declared enum set. Returns nil when no enum is declared, when the
+// property isn't a string, or when the value matches a declared
+// member. The Violation's Message and ValidFields list the
+// acceptable values so an LLM client sees them inline and
+// self-corrects without a docs lookup.
+//
+// Non-string types with declared enum are silently skipped (consistent
+// with checkBounds-on-non-numeric being a no-op). A future extension
+// could broaden this.
+func checkEnum(prop *property, field, contextName string, raw json.RawMessage) *Violation {
+	if len(prop.enum) == 0 {
+		return nil
+	}
+	if prop.typ != "string" {
+		return nil
+	}
+	var v string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		// checkType already ran and passed, so getting here means a
+		// caller reordered the pipeline. Don't second-guess the type
+		// system in a defensive check.
+		return nil
+	}
+	if slices.Contains(prop.enum, v) {
+		return nil
+	}
+	// Sort a copy for stable error text without mutating the schema.
+	allowed := append([]string(nil), prop.enum...)
+	slices.Sort(allowed)
+	return &Violation{
+		Field:       field,
+		Type:        prop.typ,
+		ValidFields: allowed,
+		Message: fmt.Sprintf("field %q in input for %s: value %q not in enum [%s]",
+			field, contextName, v, joinFields(allowed)),
+	}
 }
 
 // checkBounds enforces minimum/maximum on numeric types after the

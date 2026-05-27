@@ -424,3 +424,90 @@ func TestViolation_ImplementsError(t *testing.T) {
 	t.Parallel()
 	var _ error = (*Violation)(nil)
 }
+
+// -------------------------------------------------------------------
+// Enum constraint.
+//
+// Locks in the load-bearing property: the error message names the
+// rejected value AND lists the acceptable alternatives, so an LLM
+// client can self-correct from the response without a docs lookup.
+
+var statusEnumSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"status": {"type": "string", "enum": ["new", "in-progress", "done", "abandoned"]}
+	},
+	"required": ["status"],
+	"additionalProperties": false
+}`)
+
+func TestEnum_AcceptsDeclaredMember(t *testing.T) {
+	t.Parallel()
+	s, err := Parse(statusEnumSchema)
+	require.NoError(t, err)
+
+	for _, value := range []string{"new", "in-progress", "done", "abandoned"} {
+		v := s.Validate("task", json.RawMessage(`{"status":"`+value+`"}`))
+		assert.Nil(t, v, "enum member %q must pass", value)
+	}
+}
+
+func TestEnum_RejectsNonMember(t *testing.T) {
+	t.Parallel()
+	s, err := Parse(statusEnumSchema)
+	require.NoError(t, err)
+
+	v := s.Validate("task", json.RawMessage(`{"status":"started"}`))
+	require.NotNil(t, v)
+	assert.Contains(t, v.Message, "started", "error must name the rejected value")
+	assert.Contains(t, v.Message, "new", "error must list the acceptable members")
+	assert.Contains(t, v.Message, "abandoned")
+	assert.Equal(t, "status", v.Field)
+}
+
+func TestEnum_ValidFieldsCarriesAcceptableValues(t *testing.T) {
+	t.Parallel()
+	s, err := Parse(statusEnumSchema)
+	require.NoError(t, err)
+
+	v := s.Validate("task", json.RawMessage(`{"status":"banana"}`))
+	require.NotNil(t, v)
+	assert.ElementsMatch(t,
+		[]string{"abandoned", "done", "in-progress", "new"},
+		v.ValidFields,
+		"structured ValidFields must carry every acceptable enum value")
+}
+
+// TestEnum_OnNonStringTypeIsIgnored verifies the "permissive on the
+// edges" stance: an enum declared on a number-typed property is
+// silently skipped, matching how minimum/maximum behave on string
+// types.
+func TestEnum_OnNonStringTypeIsIgnored(t *testing.T) {
+	t.Parallel()
+	numericEnum := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"n": {"type": "integer", "enum": ["only", "strings", "supported"]}
+		},
+		"additionalProperties": false
+	}`)
+	s, err := Parse(numericEnum)
+	require.NoError(t, err)
+	v := s.Validate("tool", json.RawMessage(`{"n": 42}`))
+	assert.Nil(t, v, "enum on non-string is a no-op, not a failure")
+}
+
+func TestEnum_TypeErrorTakesPrecedenceOverEnum(t *testing.T) {
+	t.Parallel()
+	s, err := Parse(statusEnumSchema)
+	require.NoError(t, err)
+
+	// 42 is neither a string nor an enum member; the type violation
+	// is the more fundamental error and must win.
+	v := s.Validate("task", json.RawMessage(`{"status": 42}`))
+	require.NotNil(t, v)
+	assert.Contains(t, v.Message, "string",
+		"type error must take precedence over enum error")
+	assert.NotContains(t, v.Message, "enum",
+		"enum error must not be reported when the type is wrong")
+}
