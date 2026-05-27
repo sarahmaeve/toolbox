@@ -323,7 +323,11 @@ type getMessagesTool struct{ store *messagestore.Store }
 
 func (getMessagesTool) Name() string { return "get_messages" }
 func (getMessagesTool) Description() string {
-	return "List messages in a session, oldest first, with optional role and type filters."
+	return "List messages, oldest first, with optional filters. " +
+		"Pass session_id for in-session lookups; omit session_id and " +
+		"pass subject_id (or sender_id) for cross-session memory-aid " +
+		"queries — useful when persisting digests by topic across runs. " +
+		"At least one filter must be set."
 }
 func (getMessagesTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{
@@ -333,9 +337,9 @@ func (getMessagesTool) InputSchema() json.RawMessage {
 			"role":       {"type": "string"},
 			"sender_id":  {"type": "string"},
 			"type":       {"type": "string"},
-			"subject_id": {"type": "string"}
+			"subject_id": {"type": "string"},
+			"limit":      {"type": "integer", "minimum": 1}
 		},
-		"required": ["session_id"],
 		"additionalProperties": false
 	}`)
 }
@@ -346,6 +350,7 @@ func (t *getMessagesTool) Handle(ctx context.Context, input json.RawMessage) *mc
 		SenderID  string `json:"sender_id"`
 		Type      string `json:"type"`
 		SubjectID string `json:"subject_id"`
+		Limit     int    `json:"limit"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil {
 		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
@@ -356,8 +361,12 @@ func (t *getMessagesTool) Handle(ctx context.Context, input json.RawMessage) *mc
 		SenderID:  p.SenderID,
 		Type:      p.Type,
 		SubjectID: p.SubjectID,
+		Limit:     p.Limit,
 	})
 	if err != nil {
+		if errors.Is(err, messagestore.ErrFilterRequired) {
+			return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
+		}
 		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
 	}
 	if msgs == nil {
@@ -372,7 +381,10 @@ type getLatestMessageTool struct{ store *messagestore.Store }
 
 func (getLatestMessageTool) Name() string { return "get_latest_message" }
 func (getLatestMessageTool) Description() string {
-	return "Retrieve the most recent message in a session, with optional role and type filters."
+	return "Retrieve the most recent message matching the filters. " +
+		"Pass session_id for in-session lookups; omit it and pass " +
+		"subject_id (or sender_id) for the latest deposit on a topic " +
+		"across all sessions. At least one filter must be set."
 }
 func (getLatestMessageTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{
@@ -384,7 +396,6 @@ func (getLatestMessageTool) InputSchema() json.RawMessage {
 			"type":       {"type": "string"},
 			"subject_id": {"type": "string"}
 		},
-		"required": ["session_id"],
 		"additionalProperties": false
 	}`)
 }
@@ -409,6 +420,9 @@ func (t *getLatestMessageTool) Handle(ctx context.Context, input json.RawMessage
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return mcp.Err(mcp.CodeNotFound, "no matching message", nil)
+		}
+		if errors.Is(err, messagestore.ErrFilterRequired) {
+			return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
 		}
 		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
 	}

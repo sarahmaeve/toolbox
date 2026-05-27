@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,23 +172,23 @@ func (c *Client) DepositMessage(ctx context.Context, sessionID string, req Depos
 	return &msg, nil
 }
 
-// MessageQuery is the filter shape for GetLatestMessage. SessionID is
-// required; other fields are optional.
+// MessageQuery is the filter shape for GetLatestMessage and the
+// cross-session search methods. All fields optional; at least one
+// must be set on cross-session calls (the bridge rejects empty
+// filters with HTTP 400).
 type MessageQuery struct {
 	Role      string
 	SenderID  string
 	Type      string
 	SubjectID string
+	// Limit caps the number of rows returned by SearchMessages.
+	// Ignored by GetLatestMessage / SearchLatestMessage. Zero means
+	// unlimited.
+	Limit int
 }
 
-// GetLatestMessage returns the most recent message matching the given
-// filter. Returns an error wrapping the server's response body on
-// non-2xx.
-func (c *Client) GetLatestMessage(ctx context.Context, sessionID string, q MessageQuery) (*messagestore.Message, error) {
-	if sessionID == "" {
-		return nil, errors.New("get latest message: session id is required")
-	}
-	path := "/api/sessions/" + sessionID + "/messages/latest"
+// encode renders the query into URL values.
+func (q MessageQuery) encode() string {
 	v := url.Values{}
 	if q.Role != "" {
 		v.Set("role", q.Role)
@@ -201,12 +202,58 @@ func (c *Client) GetLatestMessage(ctx context.Context, sessionID string, q Messa
 	if q.SubjectID != "" {
 		v.Set("subject_id", q.SubjectID)
 	}
-	if encoded := v.Encode(); encoded != "" {
+	if q.Limit > 0 {
+		v.Set("limit", strconv.Itoa(q.Limit))
+	}
+	return v.Encode()
+}
+
+// GetLatestMessage returns the most recent message in the given
+// session matching q. Returns an error wrapping the server's response
+// body on non-2xx (notably 404 when nothing matches).
+func (c *Client) GetLatestMessage(ctx context.Context, sessionID string, q MessageQuery) (*messagestore.Message, error) {
+	if sessionID == "" {
+		return nil, errors.New("get latest message: session id is required (use SearchLatestMessage for cross-session)")
+	}
+	path := "/api/sessions/" + sessionID + "/messages/latest"
+	if encoded := q.encode(); encoded != "" {
 		path += "?" + encoded
 	}
 
 	var msg messagestore.Message
 	if err := c.getJSON(ctx, path, "get latest message", &msg); err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+// SearchMessages performs a cross-session message search bounded by
+// the query filters. At least one of Role / SenderID / Type / SubjectID
+// must be set, or the bridge returns HTTP 400. Useful as a
+// memory-aid lookup ("every digest about ticket-1234, regardless of
+// which run produced it").
+func (c *Client) SearchMessages(ctx context.Context, q MessageQuery) ([]messagestore.Message, error) {
+	path := "/api/messages"
+	if encoded := q.encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var msgs []messagestore.Message
+	if err := c.getJSON(ctx, path, "search messages", &msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+// SearchLatestMessage returns the single most-recent message matching
+// q across all sessions. Same filter rules as SearchMessages — at
+// least one filter must be set.
+func (c *Client) SearchLatestMessage(ctx context.Context, q MessageQuery) (*messagestore.Message, error) {
+	path := "/api/messages/latest"
+	if encoded := q.encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var msg messagestore.Message
+	if err := c.getJSON(ctx, path, "search latest message", &msg); err != nil {
 		return nil, err
 	}
 	return &msg, nil

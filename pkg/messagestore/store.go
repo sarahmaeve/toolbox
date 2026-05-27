@@ -47,6 +47,14 @@ var (
 	// Name collides with an existing registration.
 	ErrTypeAlreadyRegistered = errors.New("message type already registered")
 
+	// ErrFilterRequired is returned by GetMessages / GetLatestMessage
+	// when the supplied MessageFilter has no dimension set. The store
+	// refuses to scan all messages unconditionally — callers must
+	// declare what they're looking for (SessionID for in-session
+	// lookups; SubjectID / SenderID / Role / Type for cross-session
+	// search).
+	ErrFilterRequired = errors.New("MessageFilter requires at least one of SessionID, Role, SenderID, Type, SubjectID")
+
 	// ErrSchemaNotStrict is returned by RegisterType when the type's
 	// Schema does not have additionalProperties:false. The store's
 	// posture is that unknown fields are an error; permissive schemas
@@ -420,8 +428,12 @@ func isForeignKeyFailure(err error) bool {
 }
 
 // GetMessages retrieves messages matching the filter, oldest first.
+// Returns ErrFilterRequired when no filter dimension is set.
 func (s *Store) GetMessages(ctx context.Context, f MessageFilter) ([]Message, error) {
-	query, args := buildMessageQuery(f, "ASC", false)
+	query, args, err := buildMessageQuery(f, "ASC", false)
+	if err != nil {
+		return nil, err
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -441,9 +453,13 @@ func (s *Store) GetMessages(ctx context.Context, f MessageFilter) ([]Message, er
 }
 
 // GetLatestMessage retrieves the most recent message matching the
-// filter. Returns sql.ErrNoRows (wrapped) when no message matches.
+// filter. Returns sql.ErrNoRows (wrapped) when no message matches;
+// ErrFilterRequired when the filter has no dimension set.
 func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message, error) {
-	query, args := buildMessageQuery(f, "DESC", true)
+	query, args, err := buildMessageQuery(f, "DESC", true)
+	if err != nil {
+		return nil, err
+	}
 
 	row := s.db.QueryRowContext(ctx, query, args...)
 	msg, err := scanMessageRow(row)
@@ -458,13 +474,30 @@ func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message
 
 // buildMessageQuery assembles a SELECT for the messages table from a
 // MessageFilter. order is "ASC" or "DESC" applied to (created_at, id);
-// limitOne caps the query at one row. Shared between GetMessages and
-// GetLatestMessage so the column list and filter clauses can't drift.
-func buildMessageQuery(f MessageFilter, order string, limitOne bool) (string, []any) {
-	const cols = `id, session_id, role, sender_id, type, subject_id, content, created_at, metadata`
-	query := `SELECT ` + cols + ` FROM messages WHERE session_id = ?`
-	args := []any{f.SessionID}
+// limitOne caps the query at one row (overrides f.Limit).
+//
+// Returns ErrFilterRequired when no filter dimension is set — the
+// store refuses to scan all messages unconditionally.
+//
+// SessionID is optional; when empty, the query runs across all
+// sessions (the cross-session-search mode for SubjectID / SenderID
+// lookups).
+func buildMessageQuery(f MessageFilter, order string, limitOne bool) (string, []any, error) {
+	if f.SessionID == "" && f.Role == "" && f.SenderID == "" &&
+		f.Type == "" && f.SubjectID == "" {
+		return "", nil, ErrFilterRequired
+	}
 
+	const cols = `id, session_id, role, sender_id, type, subject_id, content, created_at, metadata`
+	// `WHERE 1=1` is a sentinel that lets every filter branch append
+	// uniformly with `AND`. SQLite's optimizer drops the constant.
+	query := `SELECT ` + cols + ` FROM messages WHERE 1=1`
+	var args []any
+
+	if f.SessionID != "" {
+		query += ` AND session_id = ?`
+		args = append(args, f.SessionID)
+	}
 	if f.Role != "" {
 		query += ` AND role = ?`
 		args = append(args, f.Role)
@@ -481,11 +514,21 @@ func buildMessageQuery(f MessageFilter, order string, limitOne bool) (string, []
 		query += ` AND subject_id = ?`
 		args = append(args, f.SubjectID)
 	}
+
 	query += ` ORDER BY created_at ` + order + `, id ` + order
-	if limitOne {
+
+	switch {
+	case limitOne:
 		query += ` LIMIT 1`
+	case f.Limit > 0:
+		// f.Limit is int (not user-string) so embedding via Sprintf
+		// is safe from SQL injection. Using a `?` placeholder for
+		// LIMIT works on most drivers but not all — keeping this
+		// path driver-agnostic.
+		query += fmt.Sprintf(` LIMIT %d`, f.Limit)
 	}
-	return query, args
+
+	return query, args, nil
 }
 
 // --- scan helpers ---

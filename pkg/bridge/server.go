@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/sarahmaeve/toolbox/pkg/messagestore"
@@ -108,6 +109,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/messages", s.handleGetMessages)
 	s.mux.HandleFunc("GET /api/sessions/{id}/messages/latest", s.handleGetLatestMessage)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
+
+	// Cross-session search — same handlers, but SessionID isn't bound
+	// to the URL path. Caller passes filter dimensions as query
+	// parameters; the store enforces "at least one filter is set."
+	s.mux.HandleFunc("GET /api/messages", s.handleSearchMessages)
+	s.mux.HandleFunc("GET /api/messages/latest", s.handleSearchLatestMessage)
 }
 
 // Handler returns the http.Handler for testing with httptest.
@@ -295,18 +302,14 @@ func (s *Server) handleDepositMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	filter := messagestore.MessageFilter{
-		SessionID: sessionID,
-		Role:      r.URL.Query().Get("role"),
-		SenderID:  r.URL.Query().Get("sender_id"),
-		Type:      r.URL.Query().Get("type"),
-		SubjectID: r.URL.Query().Get("subject_id"),
-	}
-
+	filter := filterFromQuery(r, r.PathValue("id"))
 	msgs, err := s.store.GetMessages(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("get messages", "session", sessionID, "error", err)
+		if errors.Is(err, messagestore.ErrFilterRequired) {
+			writeError(w, http.StatusBadRequest, "%s", err.Error())
+			return
+		}
+		s.logger.Error("get messages", "session", filter.SessionID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -328,22 +331,18 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetLatestMessage(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	filter := messagestore.MessageFilter{
-		SessionID: sessionID,
-		Role:      r.URL.Query().Get("role"),
-		SenderID:  r.URL.Query().Get("sender_id"),
-		Type:      r.URL.Query().Get("type"),
-		SubjectID: r.URL.Query().Get("subject_id"),
-	}
-
+	filter := filterFromQuery(r, r.PathValue("id"))
 	msg, err := s.store.GetLatestMessage(r.Context(), filter)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "no matching message")
 			return
 		}
-		s.logger.Error("get latest message", "session", sessionID, "error", err)
+		if errors.Is(err, messagestore.ErrFilterRequired) {
+			writeError(w, http.StatusBadRequest, "%s", err.Error())
+			return
+		}
+		s.logger.Error("get latest message", "session", filter.SessionID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -356,6 +355,72 @@ func (s *Server) handleGetLatestMessage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, msg)
+}
+
+// handleSearchMessages is the cross-session counterpart to
+// handleGetMessages: SessionID isn't bound to the URL, so the store's
+// "at least one filter" rule applies. Useful for digest-style memory
+// queries — pass subject_id or sender_id to gather messages on a
+// topic across every run.
+func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request) {
+	filter := filterFromQuery(r, "")
+	msgs, err := s.store.GetMessages(r.Context(), filter)
+	if err != nil {
+		if errors.Is(err, messagestore.ErrFilterRequired) {
+			writeError(w, http.StatusBadRequest, "%s", err.Error())
+			return
+		}
+		s.logger.Error("search messages", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if msgs == nil {
+		msgs = []messagestore.Message{}
+	}
+	writeJSON(w, http.StatusOK, msgs)
+}
+
+// handleSearchLatestMessage is the cross-session counterpart to
+// handleGetLatestMessage. Returns the single most-recent message
+// matching the supplied filters across all sessions.
+func (s *Server) handleSearchLatestMessage(w http.ResponseWriter, r *http.Request) {
+	filter := filterFromQuery(r, "")
+	msg, err := s.store.GetLatestMessage(r.Context(), filter)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "no matching message")
+			return
+		}
+		if errors.Is(err, messagestore.ErrFilterRequired) {
+			writeError(w, http.StatusBadRequest, "%s", err.Error())
+			return
+		}
+		s.logger.Error("search latest message", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, msg)
+}
+
+// filterFromQuery assembles a MessageFilter from the request's URL
+// query parameters, threading sessionID in from the URL path when
+// the per-session endpoint binds it. Empty sessionID is the
+// cross-session search mode.
+func filterFromQuery(r *http.Request, sessionID string) messagestore.MessageFilter {
+	q := r.URL.Query()
+	f := messagestore.MessageFilter{
+		SessionID: sessionID,
+		Role:      q.Get("role"),
+		SenderID:  q.Get("sender_id"),
+		Type:      q.Get("type"),
+		SubjectID: q.Get("subject_id"),
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			f.Limit = n
+		}
+	}
+	return f
 }
 
 // --- response helpers ---

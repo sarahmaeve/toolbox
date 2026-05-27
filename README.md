@@ -147,6 +147,8 @@ cp .mcp.json.example /your/project/.mcp.json
 
 The toolbox MCP server registers ten tools total: six over the messagestore (`create_session`, `deposit_message`, `list_sessions`, `get_session`, `get_messages`, `get_latest_message`) and four over the PDF stack (`pdf_extract_text`, `pdf_extract_pages`, `pdf_extract_images`, `pdf_clean_text`). All payload schemas are loaded from `--schemas-dir` at startup; the registry is in-memory per process. The bridge daemon and the MCP server share the same SQLite database by default, so messages deposited via one are immediately visible via the other.
 
+`get_messages` and `get_latest_message` accept either `session_id` (in-session lookup) or one of `sender_id` / `subject_id` / `role` / `type` (cross-session search). The cross-session mode is the memory-aid path — `get_messages(subject_id="ticket-1234")` returns every digest ever deposited about that topic, regardless of which run produced it. The bridge enforces "at least one filter set" so an empty query never sweeps the whole log; the error message names the acceptable filter fields so an LLM client can self-correct.
+
 ## Running the bridge under launchd (macOS)
 
 For an always-on bridge that survives reboots, install the example launchd user agent:

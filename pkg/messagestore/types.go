@@ -71,15 +71,27 @@ type Message struct {
 }
 
 // MessageFilter narrows GetMessages / GetLatestMessage queries.
-// SessionID is required; other dimensions are optional (empty = no
-// filter on that field). Combined conjunctively (AND) when multiple
-// are set.
+// At least one of SessionID / Role / SenderID / Type / SubjectID must
+// be set; an empty MessageFilter is rejected with ErrFilterRequired
+// (the contract is "you must be looking for something specific").
+// Set fields are combined conjunctively (AND).
+//
+// SessionID-empty is the cross-session search mode — query by
+// SubjectID for "all messages about ticket-1234 across every run",
+// or by SenderID for "everything that producer ever deposited."
+// Pair with Limit to bound the response.
 type MessageFilter struct {
 	SessionID string
 	Role      string
 	SenderID  string
 	Type      string
 	SubjectID string
+
+	// Limit caps the number of rows returned, newest matches preferred
+	// when the query orders DESC. Zero means unlimited (the historical
+	// behavior, preserved for SessionID-only queries that expect the
+	// full session log).
+	Limit int
 }
 
 // MessageType is a registered payload shape. Name is the discriminator

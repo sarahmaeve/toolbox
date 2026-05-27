@@ -519,6 +519,144 @@ func TestGetMessages_FiltersBySubject(t *testing.T) {
 	assert.Len(t, got, 2)
 }
 
+// --- cross-session search --------------------------------------------------
+
+func TestGetMessages_RejectsEmptyFilter(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	_, err := st.GetMessages(context.Background(), MessageFilter{})
+	assert.ErrorIs(t, err, ErrFilterRequired)
+}
+
+func TestGetLatestMessage_RejectsEmptyFilter(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	_, err := st.GetLatestMessage(context.Background(), MessageFilter{})
+	assert.ErrorIs(t, err, ErrFilterRequired)
+}
+
+func TestGetMessages_CrossSessionBySubject(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	// Deposit messages with the same SubjectID across three different
+	// sessions — the memory-aid-for-digests use case.
+	for i := range 3 {
+		sess, err := st.CreateSession(ctx, "run-"+string(rune('a'+i)), "")
+		require.NoError(t, err)
+		_, err = st.DepositMessage(ctx, &Message{
+			SessionID: sess.ID,
+			Role:      "agent",
+			Type:      "task.completed",
+			SubjectID: "ticket-1234",
+			Content:   json.RawMessage(`{"task_id":"t1"}`),
+		})
+		require.NoError(t, err)
+	}
+	// One message at a different subject, in its own session — must NOT
+	// match.
+	otherSess, _ := st.CreateSession(ctx, "unrelated", "")
+	_, err := st.DepositMessage(ctx, &Message{
+		SessionID: otherSess.ID,
+		Role:      "agent",
+		Type:      "task.completed",
+		SubjectID: "ticket-5678",
+		Content:   json.RawMessage(`{"task_id":"t2"}`),
+	})
+	require.NoError(t, err)
+
+	got, err := st.GetMessages(ctx, MessageFilter{SubjectID: "ticket-1234"})
+	require.NoError(t, err)
+	assert.Len(t, got, 3, "all three ticket-1234 deposits should surface, regardless of session")
+	for _, m := range got {
+		assert.Equal(t, "ticket-1234", m.SubjectID)
+	}
+}
+
+func TestGetMessages_CrossSessionBySender(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	// Same sender across three sessions; one different sender as noise.
+	for i := range 3 {
+		sess, err := st.CreateSession(ctx, "run-"+string(rune('a'+i)), "")
+		require.NoError(t, err)
+		_, err = st.DepositMessage(ctx, &Message{
+			SessionID: sess.ID,
+			Role:      "agent",
+			SenderID:  "agent.digester.v1",
+			Type:      "task.completed",
+			Content:   json.RawMessage(`{"task_id":"t1"}`),
+		})
+		require.NoError(t, err)
+	}
+	noiseSess, _ := st.CreateSession(ctx, "other", "")
+	_, err := st.DepositMessage(ctx, &Message{
+		SessionID: noiseSess.ID,
+		Role:      "agent",
+		SenderID:  "agent.other.v1",
+		Type:      "task.completed",
+		Content:   json.RawMessage(`{"task_id":"t2"}`),
+	})
+	require.NoError(t, err)
+
+	got, err := st.GetMessages(ctx, MessageFilter{SenderID: "agent.digester.v1"})
+	require.NoError(t, err)
+	assert.Len(t, got, 3)
+}
+
+func TestGetLatestMessage_CrossSessionPicksMostRecent(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	// Deposit "first" then "last" with the same subject across two sessions.
+	for _, label := range []string{"first", "second", "third"} {
+		sess, err := st.CreateSession(ctx, label, "")
+		require.NoError(t, err)
+		_, err = st.DepositMessage(ctx, &Message{
+			SessionID: sess.ID,
+			Role:      "agent",
+			Type:      "task.completed",
+			SubjectID: "ticket-X",
+			Content:   json.RawMessage(`{"task_id":"` + label + `"}`),
+		})
+		require.NoError(t, err)
+	}
+
+	got, err := st.GetLatestMessage(ctx, MessageFilter{SubjectID: "ticket-X"})
+	require.NoError(t, err)
+	assert.Contains(t, string(got.Content), "third",
+		"latest across sessions should be the most-recent deposit by created_at")
+}
+
+func TestGetMessages_LimitCapsResults(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess, _ := st.CreateSession(ctx, "x", "")
+
+	for range 5 {
+		_, err := st.DepositMessage(ctx, &Message{
+			SessionID: sess.ID,
+			Role:      "agent",
+			Type:      "task.completed",
+			Content:   json.RawMessage(`{"task_id":"t"}`),
+		})
+		require.NoError(t, err)
+	}
+
+	got, err := st.GetMessages(ctx, MessageFilter{SessionID: sess.ID, Limit: 2})
+	require.NoError(t, err)
+	assert.Len(t, got, 2)
+
+	all, err := st.GetMessages(ctx, MessageFilter{SessionID: sess.ID})
+	require.NoError(t, err)
+	assert.Len(t, all, 5, "Limit:0 means unlimited")
+}
+
 func TestRegisteredTypes_Sorted(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(t)

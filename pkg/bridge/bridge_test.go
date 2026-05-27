@@ -287,6 +287,82 @@ func TestClient_GetLatestMessage_NoMatchIs404(t *testing.T) {
 	assert.Contains(t, err.Error(), "no matching message")
 }
 
+// --- cross-session search --------------------------------------------------
+
+func TestClient_SearchMessages_BySubjectAcrossSessions(t *testing.T) {
+	t.Parallel()
+	c, _, _ := fixture(t)
+	ctx := context.Background()
+
+	for _, target := range []string{"run-a", "run-b", "run-c"} {
+		sess, err := c.CreateSession(ctx, target, "")
+		require.NoError(t, err)
+		_, err = c.DepositMessage(ctx, sess.ID, DepositRequest{
+			Role:      "agent",
+			Type:      "task.completed",
+			SubjectID: "ticket-1234",
+			Content:   json.RawMessage(`{"task_id":"t"}`),
+		})
+		require.NoError(t, err)
+	}
+
+	got, err := c.SearchMessages(ctx, MessageQuery{SubjectID: "ticket-1234"})
+	require.NoError(t, err)
+	assert.Len(t, got, 3, "cross-session search must return all three deposits")
+}
+
+func TestClient_SearchMessages_RejectsEmptyFilter(t *testing.T) {
+	t.Parallel()
+	c, _, _ := fixture(t)
+	_, err := c.SearchMessages(context.Background(), MessageQuery{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least one")
+}
+
+func TestClient_SearchLatestMessage_AcrossSessions(t *testing.T) {
+	t.Parallel()
+	c, _, _ := fixture(t)
+	ctx := context.Background()
+
+	for _, label := range []string{"first", "second", "third"} {
+		sess, err := c.CreateSession(ctx, label, "")
+		require.NoError(t, err)
+		_, err = c.DepositMessage(ctx, sess.ID, DepositRequest{
+			Role:      "agent",
+			Type:      "task.completed",
+			SubjectID: "ticket-X",
+			Content:   json.RawMessage(`{"task_id":"` + label + `"}`),
+		})
+		require.NoError(t, err)
+	}
+
+	got, err := c.SearchLatestMessage(ctx, MessageQuery{SubjectID: "ticket-X"})
+	require.NoError(t, err)
+	assert.Contains(t, string(got.Content), "third")
+}
+
+func TestClient_SearchMessages_LimitCaps(t *testing.T) {
+	t.Parallel()
+	c, _, _ := fixture(t)
+	ctx := context.Background()
+
+	for range 5 {
+		sess, err := c.CreateSession(ctx, "x", "")
+		require.NoError(t, err)
+		_, err = c.DepositMessage(ctx, sess.ID, DepositRequest{
+			Role:      "agent",
+			Type:      "task.completed",
+			SubjectID: "ticket-Y",
+			Content:   json.RawMessage(`{"task_id":"t"}`),
+		})
+		require.NoError(t, err)
+	}
+
+	got, err := c.SearchMessages(ctx, MessageQuery{SubjectID: "ticket-Y", Limit: 2})
+	require.NoError(t, err)
+	assert.Len(t, got, 2)
+}
+
 // --- client construction ---------------------------------------------------
 
 func TestNewClient_RequiresBaseURL(t *testing.T) {
