@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -213,14 +213,7 @@ func (s *Store) RegisteredTypes() []string {
 	for n := range s.types {
 		names = append(names, n)
 	}
-	// stable order so callers can render deterministically
-	for i := 0; i < len(names); i++ {
-		for j := i + 1; j < len(names); j++ {
-			if names[j] < names[i] {
-				names[i], names[j] = names[j], names[i]
-			}
-		}
-	}
+	slices.Sort(names)
 	return names
 }
 
@@ -689,7 +682,7 @@ func joinSortedSet(set map[string]struct{}) string {
 	for k := range set {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	return strings.Join(keys, ", ")
 }
 

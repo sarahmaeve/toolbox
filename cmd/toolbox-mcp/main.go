@@ -25,7 +25,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -577,6 +576,3 @@ func expandHome(p string) (string, error) {
 	}
 	return p, nil
 }
-
-// silence unused-import linter when log isn't being redirected.
-var _ = io.Discard

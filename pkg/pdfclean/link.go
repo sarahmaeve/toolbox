@@ -3,6 +3,7 @@ package pdfclean
 import (
 	"bufio"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -149,7 +150,7 @@ func ParseManifest(r io.Reader) (map[int][]ImageRef, error) {
 	out := map[int][]ImageRef{}
 	for line := 2; ; line++ {
 		row, err := cr.Read()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

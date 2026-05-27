@@ -7,7 +7,8 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
-	"sort"
+	"math"
+	"slices"
 	"strings"
 
 	// JPEG is registered here so we can image.Decode panel bytes that came
@@ -52,7 +53,7 @@ func GroupAdjacent(images []Image, tolPt float64) []FigureGroup {
 	for p := range byPage {
 		pages = append(pages, p)
 	}
-	sort.Ints(pages)
+	slices.Sort(pages)
 
 	var groups []FigureGroup
 	for _, page := range pages {
@@ -111,8 +112,8 @@ func groupPage(all []Image, idxs []int, tolPt float64) []FigureGroup {
 	for r := range components {
 		roots = append(roots, r)
 	}
-	sort.Slice(roots, func(a, b int) bool {
-		return components[roots[a]][0] < components[roots[b]][0]
+	slices.SortFunc(roots, func(a, b int) int {
+		return components[a][0] - components[b][0]
 	})
 
 	page := all[idxs[0]].Page
@@ -137,15 +138,15 @@ func groupPage(all []Image, idxs []int, tolPt float64) []FigureGroup {
 // y-edges abut; "horizontal" if they share a y-extent and their x-edges
 // abut; "" otherwise.
 func adjacencyLayout(a, b Image, tol float64) string {
-	xSame := absFloat(a.BboxX-b.BboxX) <= tol &&
-		absFloat((a.BboxX+a.BboxW)-(b.BboxX+b.BboxW)) <= tol
-	ySame := absFloat(a.BboxY-b.BboxY) <= tol &&
-		absFloat((a.BboxY+a.BboxH)-(b.BboxY+b.BboxH)) <= tol
+	xSame := math.Abs(a.BboxX-b.BboxX) <= tol &&
+		math.Abs((a.BboxX+a.BboxW)-(b.BboxX+b.BboxW)) <= tol
+	ySame := math.Abs(a.BboxY-b.BboxY) <= tol &&
+		math.Abs((a.BboxY+a.BboxH)-(b.BboxY+b.BboxH)) <= tol
 
-	yAbut := absFloat(a.BboxY-(b.BboxY+b.BboxH)) <= tol ||
-		absFloat(b.BboxY-(a.BboxY+a.BboxH)) <= tol
-	xAbut := absFloat(a.BboxX-(b.BboxX+b.BboxW)) <= tol ||
-		absFloat(b.BboxX-(a.BboxX+a.BboxW)) <= tol
+	yAbut := math.Abs(a.BboxY-(b.BboxY+b.BboxH)) <= tol ||
+		math.Abs(b.BboxY-(a.BboxY+a.BboxH)) <= tol
+	xAbut := math.Abs(a.BboxX-(b.BboxX+b.BboxW)) <= tol ||
+		math.Abs(b.BboxX-(a.BboxX+a.BboxW)) <= tol
 
 	switch {
 	case xSame && yAbut:
@@ -182,12 +183,26 @@ func sortPartsForLayout(parts []Image, layout string) {
 	switch layout {
 	case "vertical":
 		// PDF Y grows upward; topmost panel has the largest Y.
-		sort.SliceStable(parts, func(i, j int) bool {
-			return parts[i].BboxY > parts[j].BboxY
+		slices.SortStableFunc(parts, func(a, b Image) int {
+			switch {
+			case a.BboxY > b.BboxY:
+				return -1
+			case a.BboxY < b.BboxY:
+				return 1
+			default:
+				return 0
+			}
 		})
 	case "horizontal":
-		sort.SliceStable(parts, func(i, j int) bool {
-			return parts[i].BboxX < parts[j].BboxX
+		slices.SortStableFunc(parts, func(a, b Image) int {
+			switch {
+			case a.BboxX < b.BboxX:
+				return -1
+			case a.BboxX > b.BboxX:
+				return 1
+			default:
+				return 0
+			}
 		})
 	}
 }
@@ -229,9 +244,7 @@ func StitchGroup(g FigureGroup) (Image, error) {
 			b := im.Bounds()
 			positions[i] = image.Point{X: 0, Y: totalH}
 			totalH += b.Dy()
-			if b.Dx() > maxW {
-				maxW = b.Dx()
-			}
+			maxW = max(maxW, b.Dx())
 		}
 		canvasW, canvasH = maxW, totalH
 
@@ -243,9 +256,7 @@ func StitchGroup(g FigureGroup) (Image, error) {
 			b := im.Bounds()
 			positions[i] = image.Point{X: totalW, Y: 0}
 			totalW += b.Dx()
-			if b.Dy() > maxH {
-				maxH = b.Dy()
-			}
+			maxH = max(maxH, b.Dy())
 		}
 		canvasW, canvasH = totalW, maxH
 
@@ -349,11 +360,4 @@ func unionBboxH(parts []Image) float64 {
 		}
 	}
 	return maxTop - min
-}
-
-func absFloat(v float64) float64 {
-	if v < 0 {
-		return -v
-	}
-	return v
 }
