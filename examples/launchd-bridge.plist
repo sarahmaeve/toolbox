@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  toolbox-bridge launchd user agent (macOS).
+
+  Replace YOUR_USERNAME everywhere below with your actual macOS user
+  (run `whoami` to check). launchd does not expand ~ or $HOME, so the
+  absolute path matters.
+
+  Install:
+    cp examples/launchd-bridge.plist \
+       ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+    # edit YOUR_USERNAME → your actual user
+    launchctl load ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+
+  Verify:
+    toolbox-bridge doctor
+    launchctl list | grep toolbox-bridge
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+    rm ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+
+  This runs `toolbox-bridge serve run` (foreground) — launchd is the
+  supervisor, so we deliberately do NOT use `serve start` / the PID
+  file. KeepAlive restarts the bridge on crash; RunAtLoad starts it
+  at login.
+
+  Add `--allowed-roles "user,agent,orchestrator"` (or your own
+  vocabulary) below if you want role validation; absent it, any role
+  is accepted.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sarahmaeve.toolbox-bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/go/bin/toolbox-bridge</string>
+    <string>serve</string>
+    <string>run</string>
+    <string>--schemas-dir</string>
+    <string>/Users/YOUR_USERNAME/.toolbox/schemas</string>
+    <string>--db</string>
+    <string>/Users/YOUR_USERNAME/.toolbox/messages.db</string>
+    <string>--port</string>
+    <string>21518</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USERNAME/.toolbox</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USERNAME/.toolbox/log/bridge.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USERNAME/.toolbox/log/bridge.log</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

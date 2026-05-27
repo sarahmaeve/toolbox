@@ -71,11 +71,28 @@ cd toolbox
 make install                                       # builds + installs to $GOBIN with version stamp
 toolbox-bridge init --write-profile --seed-schemas # one-time bootstrap
 source ~/.zshrc                                    # picks up NODE_EXTRA_CA_CERTS
-toolbox-bridge serve start                         # daemonize the HTTPS bridge
-toolbox-bridge doctor                              # confirm everything green
 ```
 
 `init` errors out with install hints if `mkcert` is missing or `mkcert -install` hasn't been run — it never installs anything itself.
+
+Next, register the MCP server at **user scope** so its tools are visible in every Claude Code session, regardless of CWD:
+
+```bash
+claude mcp add toolbox -- "$HOME/go/bin/toolbox-mcp" \
+  --db "$HOME/.toolbox/messages.db" \
+  --schemas-dir "$HOME/.toolbox/schemas" \
+  --allowed-roles "user,agent,orchestrator" \
+  --log "$HOME/.toolbox/log/mcp.log"
+```
+
+(Check `claude mcp --help` if the exact syntax differs in your CLI version.) Then start the bridge daemon and confirm everything is wired up:
+
+```bash
+toolbox-bridge serve start                         # manual: alive until reboot or stop
+toolbox-bridge doctor                              # everything green
+```
+
+For an always-on bridge that survives reboots, see [Running under launchd](#running-the-bridge-under-launchd-macos) below.
 
 ## Subcommand surface
 
@@ -92,7 +109,7 @@ toolbox-bridge certs check                                lower-level (doctor co
 toolbox-bridge version
 ```
 
-`toolbox-mcp` is stdio-only — its lifecycle is owned by the MCP client (Claude Code spawns and reaps it). See `.mcp.json.example` for wiring.
+`toolbox-mcp` is stdio-only — its lifecycle is owned by the MCP client (Claude Code spawns and reaps it). See [MCP integration with Claude Code](#mcp-integration-with-claude-code) below for the recommended user-scope registration, or `.mcp.json.example` for per-project alternative wiring.
 
 ```
 toolbox-pdf dump   [-page N | -pages N-M] <file.pdf>
@@ -116,14 +133,44 @@ The same operations are exposed as MCP tools (`pdf_extract_text`, `pdf_extract_p
 
 ## MCP integration with Claude Code
 
+Two scopes available:
+
+**User scope (recommended).** Registered once via `claude mcp add` (see [Quick start](#quick-start) above). Available in every Claude Code session regardless of CWD — ideal for utility tools you reach for from anywhere. The toolbox is built for this scope: every default path is under `~/.toolbox/`, so one registration covers all projects.
+
+**Project scope (alternative).** Place a `.mcp.json` in a project root and Claude Code auto-loads it when launched from there. Use this only when you genuinely want per-project isolation — e.g. a project that should see a *different* `--schemas-dir` or `--allowed-roles` set than the user-scope default.
+
 ```bash
 cp .mcp.json.example /your/project/.mcp.json
 # Edit /your/project/.mcp.json: replace YOUR_USERNAME with your actual user
 # (Claude Code does not expand ~ or $HOME — paths must be absolute)
-claude                                             # run in your project
 ```
 
-The toolbox MCP server registers six tools: `create_session`, `deposit_message`, `list_sessions`, `get_session`, `get_messages`, `get_latest_message`. All payload schemas are loaded from `--schemas-dir` at startup; the registry is in-memory per process. The bridge daemon and the MCP server share the same SQLite database by default, so messages deposited via one are immediately visible via the other.
+The toolbox MCP server registers ten tools total: six over the messagestore (`create_session`, `deposit_message`, `list_sessions`, `get_session`, `get_messages`, `get_latest_message`) and four over the PDF stack (`pdf_extract_text`, `pdf_extract_pages`, `pdf_extract_images`, `pdf_clean_text`). All payload schemas are loaded from `--schemas-dir` at startup; the registry is in-memory per process. The bridge daemon and the MCP server share the same SQLite database by default, so messages deposited via one are immediately visible via the other.
+
+## Running the bridge under launchd (macOS)
+
+For an always-on bridge that survives reboots, install the example launchd user agent:
+
+```bash
+# Copy the example into ~/Library/LaunchAgents and edit YOUR_USERNAME paths
+cp examples/launchd-bridge.plist \
+   ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+# Replace YOUR_USERNAME everywhere with `whoami`
+$EDITOR ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+
+# Load and verify
+launchctl load ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+toolbox-bridge doctor                              # daemon probe should now read PASS
+launchctl list | grep toolbox-bridge               # confirm launchd has it
+```
+
+The plist runs `serve run` (foreground) — launchd is the supervisor, so we deliberately skip `serve start` and the PID file. `KeepAlive=true` restarts the bridge on crash; `RunAtLoad=true` starts it at login. To stop:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.sarahmaeve.toolbox-bridge.plist
+```
+
+On Linux, the equivalent is a `~/.config/systemd/user/toolbox-bridge.service` unit with `ExecStart=$HOME/go/bin/toolbox-bridge serve run …` and `systemctl --user enable --now toolbox-bridge`. Recipe contributions welcome.
 
 ## Design decisions worth knowing
 
