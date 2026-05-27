@@ -402,3 +402,68 @@ func TestListTasks_InputSchemaIsStrictReject(t *testing.T) {
 	raw := tool.InputSchema()
 	assert.Contains(t, string(raw), `"additionalProperties": false`)
 }
+
+// --- parsePageRange -------------------------------------------------------
+
+// TestParsePageRange covers every documented mode of the page/pages tool
+// arguments. The function is reached from pdf_extract_text and
+// pdf_extract_pages and is the only place those inputs are normalized;
+// silently accepting a bad range would cascade into a pkg/pdf call against
+// a nonsense page list. Pinning the edges here keeps the surface honest.
+func TestParsePageRange(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		page     int
+		pages    string
+		wantFrom int
+		wantTo   int
+		wantErr  bool
+	}{
+		// Happy paths.
+		{name: "both empty means all pages", wantFrom: 0, wantTo: 0},
+		{name: "single page", page: 5, wantFrom: 5, wantTo: 5},
+		{name: "explicit range", pages: "3-7", wantFrom: 3, wantTo: 7},
+		{name: "single-page range", pages: "4-4", wantFrom: 4, wantTo: 4},
+		// Page is preferred when both are set — pin the precedence so a
+		// future refactor doesn't silently flip it (the binary tool says
+		// the two are mutually exclusive at the schema level, but this
+		// helper accepts both shapes).
+		{name: "page wins when both set", page: 2, pages: "10-20", wantFrom: 2, wantTo: 2},
+
+		// page= negative / zero edge.
+		{name: "negative page rejected", page: -1, wantErr: true},
+
+		// pages= shape errors.
+		{name: "pages without dash", pages: "5", wantErr: true},
+		{name: "pages leading dash", pages: "-5", wantErr: true},
+		{name: "pages trailing dash", pages: "5-", wantErr: true},
+		{name: "pages non-numeric start", pages: "a-5", wantErr: true},
+		{name: "pages non-numeric end", pages: "5-z", wantErr: true},
+		{name: "pages decimal start", pages: "1.5-5", wantErr: true},
+
+		// pages= range semantics.
+		{name: "pages from below 1", pages: "0-5", wantErr: true},
+		{name: "pages reversed range", pages: "10-2", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			from, to, err := parsePageRange(tc.page, tc.pages)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got (%d, %d)", from, to)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if from != tc.wantFrom || to != tc.wantTo {
+				t.Errorf("range: got (%d, %d), want (%d, %d)",
+					from, to, tc.wantFrom, tc.wantTo)
+			}
+		})
+	}
+}

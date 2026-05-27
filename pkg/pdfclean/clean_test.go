@@ -214,3 +214,57 @@ func TestLoadManifest_RoundTrip(t *testing.T) {
 		t.Errorf("page 5 entry: got %+v", got[5])
 	}
 }
+
+func TestParseManifest_RejectsPathTraversal(t *testing.T) {
+	t.Parallel()
+
+	// A manifest entry with ".." or an absolute path produces a markdown
+	// link that escapes the operator-supplied imgdir; downstream renderers
+	// (e.g. mdBook, GitBook, Pandoc → HTML/PDF) may resolve those links
+	// against the filesystem and read attacker-chosen files. The parser
+	// itself doesn't open the file, but the manifest is the trust boundary
+	// — embedding a traversal path produces a downstream injection vector.
+	cases := []struct {
+		name string
+		file string
+	}{
+		{"parent dir", "../escape.png"},
+		{"nested parent", "subdir/../../../escape.png"},
+		{"absolute unix", "/etc/passwd"},
+		{"leading slash", "/var/log/secrets.png"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tsv := "file\tpage\tname\n" + tc.file + "\t1\tIm0\n"
+			_, err := ParseManifest(strings.NewReader(tsv))
+			if err == nil {
+				t.Errorf("expected rejection of %q, got nil", tc.file)
+			}
+		})
+	}
+}
+
+func TestParseManifest_AcceptsPlainBasename(t *testing.T) {
+	t.Parallel()
+
+	// Sanity check that the IsLocal guard doesn't accidentally reject
+	// the kinds of names toolbox-pdf actually produces (basenames with
+	// hyphens, dots, plus signs from stitched groups, digits).
+	cases := []string{
+		"plain.png",
+		"a-p0004-Im0.png",
+		"a-p0005-Im0+Im1.png",
+		"nested/sub.png",
+	}
+	for _, file := range cases {
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
+			tsv := "file\tpage\tname\n" + file + "\t1\tIm0\n"
+			_, err := ParseManifest(strings.NewReader(tsv))
+			if err != nil {
+				t.Errorf("unexpected rejection of %q: %v", file, err)
+			}
+		})
+	}
+}

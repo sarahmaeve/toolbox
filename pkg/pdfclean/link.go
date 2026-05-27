@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -160,8 +161,16 @@ func ParseManifest(r io.Reader) (map[int][]ImageRef, error) {
 		if err != nil {
 			return nil, fmt.Errorf("manifest line %d: invalid page %q: %w", line, row[col["page"]], err)
 		}
+		file := row[col["file"]]
+		// Reject ".." traversal and absolute paths in the manifest; the
+		// File field becomes part of a markdown link that downstream
+		// renderers may resolve against the filesystem. filepath.IsLocal
+		// is the canonical Go check for "stays within the rooted dir."
+		if !filepath.IsLocal(file) {
+			return nil, fmt.Errorf("manifest line %d: file %q is not a local path", line, file)
+		}
 		out[page] = append(out[page], ImageRef{
-			File: row[col["file"]],
+			File: file,
 			Name: row[col["name"]],
 		})
 	}
