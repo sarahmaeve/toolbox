@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,6 +74,42 @@ func TestOpen_RequiresDBPath(t *testing.T) {
 	_, err := Open(context.Background(), Config{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "DBPath")
+}
+
+func TestOpen_PragmasSurviveConnectionReplacement(t *testing.T) {
+	t.Parallel()
+
+	// foreign_keys and busy_timeout are connection-local in SQLite. If
+	// the database/sql pool closes and reopens a connection (after a
+	// transient error, or an idle-conn timeout in some future config
+	// change), an explicit PRAGMA issued at Open() time stays behind on
+	// the dead conn — the new one boots with foreign_keys=OFF, silently
+	// turning FK violations into orphaned-row corruption.
+	//
+	// The fix is to encode pragmas in the DSN. The property here pins
+	// that fix by forcing the pool to replace the connection and then
+	// querying the pragmas back.
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := Open(context.Background(), Config{DBPath: dbPath})
+	require.NoError(t, err)
+	defer st.Close() //nolint:errcheck
+
+	db := st.DB()
+	db.SetConnMaxLifetime(time.Nanosecond)
+	time.Sleep(2 * time.Millisecond)
+
+	ctx := context.Background()
+	var fk int
+	require.NoError(t, db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fk))
+	if fk != 1 {
+		t.Errorf("foreign_keys after connection replacement: got %d, want 1 — pragma is connection-local and did not survive", fk)
+	}
+
+	var busy int
+	require.NoError(t, db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busy))
+	if busy != 5000 {
+		t.Errorf("busy_timeout after connection replacement: got %d, want 5000", busy)
+	}
 }
 
 // --- RegisterType ----------------------------------------------------------

@@ -114,7 +114,18 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("close pre-created database file: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", cfg.DBPath)
+	// Encode pragmas in the DSN so the modernc.org/sqlite driver applies
+	// them on every connection the pool opens — not just the first one.
+	// foreign_keys and busy_timeout are connection-local; an explicit
+	// PRAGMA issued after sql.Open() applies only to the original conn
+	// and is silently lost if the pool replaces it (e.g., on a transient
+	// error). journal_mode=WAL is persisted at the database-file level,
+	// so encoding it here is belt-and-braces but harmless.
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(wal)",
+		cfg.DBPath,
+	)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -130,28 +141,20 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	}
 
 	// SQLite allows one writer at a time; database/sql's pool would
-	// open multiple connections whose per-connection PRAGMAs are not
-	// shared. A single connection serializes and ensures pragmas apply.
+	// otherwise open multiple connections that serialize awkwardly at
+	// the file lock. A single connection avoids the contention.
 	db.SetMaxOpenConns(1)
 
+	// Verify WAL was honored — the DSN pragma is fire-and-forget, so we
+	// query it back to fail loudly if the platform/build doesn't support it.
 	var journalMode string
-	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
 		_ = db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("set journal_mode: %w", err)
+		return nil, fmt.Errorf("verify journal_mode: %w", err)
 	}
 	if journalMode != "wal" {
 		_ = db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("WAL mode not supported (got %q); messagestore requires WAL for safe concurrent access", journalMode)
-	}
-
-	for _, pragma := range []string{
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-	} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close() //nolint:errcheck
-			return nil, fmt.Errorf("set %s: %w", pragma, err)
-		}
+		return nil, fmt.Errorf("WAL mode not honored (got %q); messagestore requires WAL for safe concurrent access", journalMode)
 	}
 
 	if err := migrate(ctx, db, cfg.DBPath); err != nil {
