@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -380,13 +381,15 @@ func (s *Store) DepositMessage(ctx context.Context, msg *Message) (*Message, err
 
 	if len(s.allowedRoles) > 0 {
 		if _, ok := s.allowedRoles[msg.Role]; !ok {
-			return nil, fmt.Errorf("%w: %q", ErrUnknownRole, msg.Role)
+			return nil, fmt.Errorf("%w: %q; allowed roles: [%s]",
+				ErrUnknownRole, msg.Role, joinSortedSet(s.allowedRoles))
 		}
 	}
 
 	mt := s.LookupType(msg.Type)
 	if mt == nil {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownType, msg.Type)
+		return nil, fmt.Errorf("%w: %q; registered types: [%s]",
+			ErrUnknownType, msg.Type, strings.Join(s.RegisteredTypes(), ", "))
 	}
 
 	if v := mt.Schema.Validate(msg.Type, msg.Content); v != nil {
@@ -470,6 +473,88 @@ func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message
 		return nil, err
 	}
 	return &msg, nil
+}
+
+// LatestPerSubject returns one Message per distinct SubjectID — the
+// most recent for each, by created_at then id (deterministic on
+// ties). Rows without a SubjectID (NULL or empty) are excluded; the
+// purpose of this method is "give me the current state of every
+// topic," and a row that doesn't declare a topic doesn't participate.
+//
+// The filter follows the same rules as GetMessages: at least one
+// dimension must be set, returning ErrFilterRequired otherwise.
+// Limit caps the number of subjects returned (0 = unlimited).
+//
+// Typical use: "what's the current state of every task?" via
+// LatestPerSubject(MessageFilter{Type: "task"}).
+func (s *Store) LatestPerSubject(ctx context.Context, f MessageFilter) ([]Message, error) {
+	if f.SessionID == "" && f.Role == "" && f.SenderID == "" &&
+		f.Type == "" && f.SubjectID == "" {
+		return nil, ErrFilterRequired
+	}
+
+	const cols = `id, session_id, role, sender_id, type, subject_id, content, created_at, metadata`
+	// Window-function approach: rank rows by (created_at, id) DESC
+	// within each subject_id partition, then keep rank 1. SQLite 3.25+
+	// supports this; modernc.org/sqlite ships a newer version.
+	//
+	// The inner WHERE applies the filter dimensions to constrain the
+	// universe of rows the partition runs over. The outer WHERE picks
+	// the latest from each partition.
+	query := `SELECT ` + cols + ` FROM (
+	    SELECT ` + cols + `,
+	      ROW_NUMBER() OVER (
+	        PARTITION BY subject_id
+	        ORDER BY created_at DESC, id DESC
+	      ) AS rn
+	    FROM messages
+	    WHERE subject_id IS NOT NULL AND subject_id != ''`
+	var args []any
+
+	if f.SessionID != "" {
+		query += ` AND session_id = ?`
+		args = append(args, f.SessionID)
+	}
+	if f.Role != "" {
+		query += ` AND role = ?`
+		args = append(args, f.Role)
+	}
+	if f.SenderID != "" {
+		query += ` AND sender_id = ?`
+		args = append(args, f.SenderID)
+	}
+	if f.Type != "" {
+		query += ` AND type = ?`
+		args = append(args, f.Type)
+	}
+	if f.SubjectID != "" {
+		query += ` AND subject_id = ?`
+		args = append(args, f.SubjectID)
+	}
+
+	query += `
+	) WHERE rn = 1
+	ORDER BY created_at DESC, id DESC`
+
+	if f.Limit > 0 {
+		query += fmt.Sprintf(` LIMIT %d`, f.Limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("latest per subject: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Message
+	for rows.Next() {
+		msg, err := scanMessageRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, msg)
+	}
+	return out, rows.Err()
 }
 
 // buildMessageQuery assembles a SELECT for the messages table from a
@@ -593,6 +678,19 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// joinSortedSet renders a set of strings as a sorted, comma-separated
+// list — used in self-documenting error messages ("allowed roles:
+// [agent, orchestrator, user]") so an LLM client learns the
+// vocabulary from the rejection.
+func joinSortedSet(set map[string]struct{}) string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
 
 // Compile-time check that schema.Violation is in scope (referenced via

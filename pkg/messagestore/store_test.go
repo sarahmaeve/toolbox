@@ -227,6 +227,11 @@ func TestDeposit_RejectsUnknownRole(t *testing.T) {
 		Content:   json.RawMessage(`{"task_id":"t1"}`),
 	})
 	assert.ErrorIs(t, err, ErrUnknownRole)
+	// Self-documenting: the error must list the allowed alternatives
+	// so an LLM client learns the vocabulary from the rejection.
+	assert.Contains(t, err.Error(), "agent",
+		"unknown-role error must list the AllowedRoles set")
+	assert.Contains(t, err.Error(), "orchestrator")
 }
 
 func TestDeposit_AcceptsAnyRoleWhenAllowListEmpty(t *testing.T) {
@@ -265,6 +270,11 @@ func TestDeposit_RejectsUnknownType(t *testing.T) {
 		Content:   json.RawMessage(`{}`),
 	})
 	assert.ErrorIs(t, err, ErrUnknownType)
+	// Same property as ErrUnknownRole: the error lists the
+	// registered types so the agent can pick a valid one without
+	// guessing.
+	assert.Contains(t, err.Error(), "task.completed",
+		"unknown-type error must list registered MessageType names")
 }
 
 func TestDeposit_RejectsSchemaViolation_UnknownField(t *testing.T) {
@@ -630,6 +640,82 @@ func TestGetLatestMessage_CrossSessionPicksMostRecent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(got.Content), "third",
 		"latest across sessions should be the most-recent deposit by created_at")
+}
+
+// --- LatestPerSubject ------------------------------------------------------
+
+func TestLatestPerSubject_OneEntryPerTopic(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess, _ := st.CreateSession(ctx, "x", "")
+
+	// Two updates each for two distinct subjects, plus one untyped
+	// (subject_id="") row that must be excluded.
+	for _, ev := range []struct{ subj, body string }{
+		{"task-A", "first-A"},
+		{"task-A", "second-A"},
+		{"task-B", "first-B"},
+		{"task-B", "second-B"},
+	} {
+		_, err := st.DepositMessage(ctx, &Message{
+			SessionID: sess.ID,
+			Role:      "agent",
+			Type:      "task.completed",
+			SubjectID: ev.subj,
+			Content:   json.RawMessage(`{"task_id":"` + ev.body + `"}`),
+		})
+		require.NoError(t, err)
+	}
+	// No-subject row: should not appear in the result.
+	_, err := st.DepositMessage(ctx, &Message{
+		SessionID: sess.ID,
+		Role:      "agent",
+		Type:      "task.completed",
+		Content:   json.RawMessage(`{"task_id":"no-subj"}`),
+	})
+	require.NoError(t, err)
+
+	got, err := st.LatestPerSubject(ctx, MessageFilter{Type: "task.completed"})
+	require.NoError(t, err)
+	require.Len(t, got, 2, "one entry per distinct SubjectID; the no-subject row is excluded")
+
+	bySubj := map[string]Message{}
+	for _, m := range got {
+		bySubj[m.SubjectID] = m
+	}
+	assert.Contains(t, string(bySubj["task-A"].Content), "second-A",
+		"the most recent update wins per subject")
+	assert.Contains(t, string(bySubj["task-B"].Content), "second-B")
+}
+
+func TestLatestPerSubject_RejectsEmptyFilter(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	_, err := st.LatestPerSubject(context.Background(), MessageFilter{})
+	assert.ErrorIs(t, err, ErrFilterRequired)
+}
+
+func TestLatestPerSubject_LimitCaps(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess, _ := st.CreateSession(ctx, "x", "")
+
+	for _, subj := range []string{"a", "b", "c", "d", "e"} {
+		_, err := st.DepositMessage(ctx, &Message{
+			SessionID: sess.ID,
+			Role:      "agent",
+			Type:      "task.completed",
+			SubjectID: subj,
+			Content:   json.RawMessage(`{"task_id":"t"}`),
+		})
+		require.NoError(t, err)
+	}
+
+	got, err := st.LatestPerSubject(ctx, MessageFilter{Type: "task.completed", Limit: 3})
+	require.NoError(t, err)
+	assert.Len(t, got, 3)
 }
 
 func TestGetMessages_LimitCapsResults(t *testing.T) {
