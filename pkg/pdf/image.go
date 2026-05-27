@@ -7,8 +7,16 @@ import (
 	"image"
 	"image/png"
 	"log"
-	"sort"
+	"slices"
 )
+
+// maxImagePixels caps how many pixels an image extracted from a PDF may
+// claim. A hostile document declaring Width × Height in the billions would
+// otherwise drive image.NewRGBA/NewGray into a multi-TB allocation —
+// pixelBufferLength's overflow guard panics with a non-recoverable runtime
+// error, killing the host. 100 megapixels is comfortably above any real
+// figure (a 10000×10000 photo) while bounding the worst case.
+const maxImagePixels = 100 * 1000 * 1000
 
 // Image holds an extracted Image XObject ready to write to disk. Data is
 // already in the encoding implied by Ext.
@@ -72,7 +80,7 @@ func (f *pdfFile) extractPageImages(ref pdfRef, pageNum int) ([]Image, error) {
 	for n := range xobjects {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	var out []Image
 	for _, name := range names {
@@ -372,6 +380,9 @@ func encodeRasterAsPNG(raster []byte, w, h, bpc int, cs effectiveColorSpace) ([]
 	if w <= 0 || h <= 0 {
 		return nil, "", fmt.Errorf("invalid dimensions %dx%d", w, h)
 	}
+	if int64(w)*int64(h) > maxImagePixels {
+		return nil, fmt.Sprintf("dimensions %dx%d exceed pixel ceiling %d", w, h, maxImagePixels), nil
+	}
 
 	if cs.kind == "" {
 		return nil, fmt.Sprintf("colorspace %q not yet supported", cs.label), nil
@@ -516,6 +527,9 @@ func unpackIndices(raster []byte, w, h, bpc int) ([]byte, error) {
 func wrapCCITTAsTIFF(payload []byte, width, height int, parms pdfDict) ([]byte, error) {
 	if width <= 0 || height <= 0 {
 		return nil, fmt.Errorf("invalid CCITT dimensions %dx%d", width, height)
+	}
+	if int64(width)*int64(height) > maxImagePixels {
+		return nil, fmt.Errorf("CCITT dimensions %dx%d exceed pixel ceiling %d", width, height, maxImagePixels)
 	}
 
 	k := 0

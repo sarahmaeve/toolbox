@@ -1,6 +1,10 @@
 package pdf
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestParseObjStmContents_TwoObjects(t *testing.T) {
 	t.Parallel()
@@ -76,6 +80,28 @@ func TestParseObjStmContents_RejectsFirstOutOfBounds(t *testing.T) {
 	}
 }
 
+func TestParseObjStmContents_RejectsHostileNExceedingPrefix(t *testing.T) {
+	t.Parallel()
+
+	// A malicious /N of 2 billion with a 4-byte prefix would request
+	// ~32 GB from make([][2]int, 0, n). The smallest plausible pair is
+	// two single-digit integers and one separator (4 bytes), so any /N
+	// that exceeds len(prefix)/4 is structurally impossible and must be
+	// rejected before the allocation, not after a doomed read-loop.
+	data := []byte("1 0 ")
+	const hostileN = 1 << 30
+
+	_, err := parseObjStmContents(data, hostileN, 4)
+	if err == nil {
+		t.Fatal("expected error for /N far exceeding prefix capacity, got nil")
+	}
+	// Differentiates "early structural reject" from "loop ran until prefix
+	// ran out": only the former mentions /N as the offending field.
+	if !strings.Contains(err.Error(), "/N") {
+		t.Errorf("error %q does not name the offending /N field — looks like a late rejection", err.Error())
+	}
+}
+
 func TestReadCompressedObject_ReadsValueAtIndex(t *testing.T) {
 	t.Parallel()
 
@@ -116,5 +142,53 @@ func TestReadCompressedObject_RejectsIndexMismatch(t *testing.T) {
 
 	if _, err := f.readCompressedObject(6, 42, 0); err == nil {
 		t.Error("expected error for obj-number mismatch, got nil")
+	}
+}
+
+func TestResolve_BreaksLengthSelfReferenceCycle(t *testing.T) {
+	t.Parallel()
+
+	// Object 5's stream advertises /Length 5 0 R — its own length references
+	// itself. Resolving it must terminate (returning nil) instead of
+	// recursing through readUncompressedObject -> resolve(Length) -> ...
+	// until Go's stack-growth ceiling is hit (fatal, unrecoverable).
+	data := []byte("5 0 obj << /Length 5 0 R >> stream\nXY\nendstream\nendobj")
+	f := newTestPDFFile()
+	f.data = data
+	f.xref[5] = xrefEntry{kind: xrefUncompressed, offset: 0}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = f.resolve(pdfRef{num: 5})
+	}()
+	select {
+	case <-done:
+		// Cycle broken — exact return value is irrelevant; surviving is.
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolve() did not return within 2s — /Length self-reference cycle not broken")
+	}
+}
+
+func TestResolve_BreaksCompressedObjStmSelfReferenceCycle(t *testing.T) {
+	t.Parallel()
+
+	// Object 5's xref entry claims it lives compressed inside object stream
+	// 5 — i.e. the host object stream is itself the object we're chasing.
+	// readCompressedObject -> loadObjStm -> readObject -> back to
+	// readCompressedObject must be broken or the parser spins forever.
+	f := newTestPDFFile()
+	f.xref[5] = xrefEntry{kind: xrefCompressed, offset: 0, objStmNum: 5, objStmIdx: 0}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = f.resolve(pdfRef{num: 5})
+	}()
+	select {
+	case <-done:
+		// ok
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolve() did not return within 2s — compressed-objstm self-reference cycle not broken")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"image"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,45 @@ func newImageTestFile() *pdfFile {
 		xref:    map[int]xrefEntry{},
 		cache:   map[int]any{},
 		objStms: map[int]*objStm{},
+	}
+}
+
+func TestEncodeRasterAsPNG_RejectsHostileDimensions(t *testing.T) {
+	t.Parallel()
+
+	// 1_000_000 x 1_000_000 RGB asks image.NewRGBA for 4 TB. Without a
+	// pixel-area cap that allocation panics inside the stdlib (it overflows
+	// pixelBufferLength's int check on 32-bit builds; on 64-bit the kernel
+	// OOM-kills the process). The cap must fire before NewRGBA is reached
+	// and must NOT be conflated with the downstream "raster too short"
+	// check — the test asserts that by providing enough raster bytes that
+	// the length check would otherwise pass.
+	cs := effectiveColorSpace{kind: "rgb", label: "DeviceRGB"}
+
+	// A small raster: NewRGBA would have rejected anyway, but our pixel
+	// cap should reject BEFORE the raster length check fires.
+	_, reason, err := encodeRasterAsPNG(nil, 1_000_000, 1_000_000, 8, cs)
+	if err != nil {
+		t.Fatalf("expected skip-reason for hostile dimensions, got hard error: %v", err)
+	}
+	if reason == "" {
+		t.Fatal("expected non-empty skip reason for hostile dimensions")
+	}
+	if !strings.Contains(reason, "dimensions") && !strings.Contains(reason, "pixel") {
+		t.Errorf("reason %q does not mention the dimension/pixel ceiling", reason)
+	}
+}
+
+func TestWrapCCITTAsTIFF_RejectsHostileDimensions(t *testing.T) {
+	t.Parallel()
+
+	// CCITT path doesn't allocate a raster of width*height bytes, but it
+	// does cast both to uint32 — values >MaxUint32 silently wrap. Reject
+	// implausible dimensions up front for the same defense-in-depth
+	// reason that the raster path needs a ceiling.
+	_, err := wrapCCITTAsTIFF([]byte{0x00}, 1_000_000, 1_000_000, pdfDict{})
+	if err == nil {
+		t.Fatal("expected error for absurd CCITT dimensions, got nil")
 	}
 }
 

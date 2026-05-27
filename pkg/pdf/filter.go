@@ -67,16 +67,33 @@ func (f *pdfFile) decodeStream(s pdfStream) ([]byte, error) {
 	return result, nil
 }
 
-// decompressFlate decompresses a zlib/deflate-compressed byte slice.
+// maxDecompressedStreamSize caps the size of a single decompressed stream.
+// PDF streams (xref tables, content, images, CMaps) realistically fit well
+// below this; the cap exists to deny a zlib bomb the chance to OOM the host.
+const maxDecompressedStreamSize = 256 * 1024 * 1024 // 256 MiB
+
+// decompressFlate decompresses a zlib/deflate-compressed byte slice. A
+// hostile payload that would expand beyond maxDecompressedStreamSize is
+// rejected with an error that names the cap.
 func decompressFlate(data []byte) ([]byte, error) {
 	rc, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("zlib init: %w", err)
 	}
 	defer rc.Close()
-	decoded, err := io.ReadAll(rc)
+	limited := io.LimitReader(rc, maxDecompressedStreamSize)
+	decoded, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("flate decompress: %w", err)
+	}
+	if int64(len(decoded)) == maxDecompressedStreamSize {
+		// Probe one more byte: if anything follows, the payload exceeded
+		// the cap and we must refuse rather than silently truncate.
+		var probe [1]byte
+		n, _ := rc.Read(probe[:])
+		if n > 0 {
+			return nil, fmt.Errorf("flate decompress: decoded size exceeds cap of %d bytes", maxDecompressedStreamSize)
+		}
 	}
 	return decoded, nil
 }

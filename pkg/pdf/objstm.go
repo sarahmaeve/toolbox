@@ -17,6 +17,13 @@ func parseObjStmContents(data []byte, n, first int) (*objStm, error) {
 		return nil, fmt.Errorf("objstm: negative /N %d", n)
 	}
 
+	// The smallest plausible "objNum offset" pair is four bytes (two single
+	// digits + separators). Reject a hostile /N that can't possibly fit in
+	// the prefix before make() reserves capacity proportional to n.
+	if maxPairs := first / 4; n > maxPairs+1 {
+		return nil, fmt.Errorf("objstm: /N %d exceeds prefix capacity (first=%d)", n, first)
+	}
+
 	pairs := make([][2]int, 0, n)
 	pos := 0
 	prefix := data[:first]
@@ -79,6 +86,14 @@ func (f *pdfFile) readCompressedObject(num, streamNum, idx int) (any, error) {
 func (f *pdfFile) loadObjStm(streamNum int) (*objStm, error) {
 	if cached, ok := f.objStms[streamNum]; ok {
 		return cached, nil
+	}
+
+	// Per PDF 1.5 §7.5.7 an object stream is itself an uncompressed indirect
+	// object. A crafted file with xref[streamNum].kind == xrefCompressed
+	// would have readObject recurse straight back into loadObjStm; reject
+	// up front rather than chase the cycle.
+	if entry, ok := f.xref[streamNum]; ok && entry.kind == xrefCompressed {
+		return nil, fmt.Errorf("objstm %d is itself listed as compressed (cycle)", streamNum)
 	}
 
 	// The host object stream itself is an uncompressed indirect object;

@@ -174,6 +174,77 @@ func TestParseValue(t *testing.T) {
 	})
 }
 
+func TestParseValue_RejectsDeeplyNestedArray(t *testing.T) {
+	t.Parallel()
+
+	// Hostile PDFs can include arbitrarily nested arrays/dicts. Without a
+	// depth bound this recurses through parseValue->parseArray->parseValue
+	// until Go's stack-growth limit is hit and the process dies with a
+	// fatal, unrecoverable panic. The parser must surface an error well
+	// before that.
+	const depth = 20000
+	data := make([]byte, 0, 2*depth)
+	for range depth {
+		data = append(data, '[')
+	}
+	for range depth {
+		data = append(data, ']')
+	}
+
+	f := newTestPDFFile()
+	_, _, err := parseValue(data, 0, f)
+	if err == nil {
+		t.Fatal("expected depth-limit error on deeply nested array, got nil")
+	}
+	if !strings.Contains(err.Error(), "depth") {
+		t.Errorf("error %q does not name the depth limit", err.Error())
+	}
+}
+
+func TestParseValue_RejectsDeeplyNestedDict(t *testing.T) {
+	t.Parallel()
+
+	const depth = 20000
+	data := make([]byte, 0, 6*depth)
+	for range depth {
+		data = append(data, []byte("<</a ")...)
+	}
+	data = append(data, '0')
+	for range depth {
+		data = append(data, []byte(" >>")...)
+	}
+
+	f := newTestPDFFile()
+	_, _, err := parseValue(data, 0, f)
+	if err == nil {
+		t.Fatal("expected depth-limit error on deeply nested dict, got nil")
+	}
+	if !strings.Contains(err.Error(), "depth") {
+		t.Errorf("error %q does not name the depth limit", err.Error())
+	}
+}
+
+func TestParseValue_AcceptsModestNesting(t *testing.T) {
+	t.Parallel()
+
+	// Real-world PDFs do nest, just not pathologically. A few dozen levels
+	// of mixed arrays and dicts must still parse cleanly so the depth
+	// guard doesn't break legitimate documents.
+	const depth = 64
+	data := make([]byte, 0, 6*depth)
+	for range depth {
+		data = append(data, '[')
+	}
+	for range depth {
+		data = append(data, ']')
+	}
+
+	f := newTestPDFFile()
+	if _, _, err := parseValue(data, 0, f); err != nil {
+		t.Fatalf("parseValue at depth %d should succeed: %v", depth, err)
+	}
+}
+
 func TestReadRawNumber(t *testing.T) {
 	t.Parallel()
 

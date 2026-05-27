@@ -57,6 +57,12 @@ type pdfFile struct {
 	trailer pdfDict           // trailer dictionary (carries /Root, /Info, /Size)
 	cache   map[int]any       // resolved object cache (objNum -> parsed value)
 	objStms map[int]*objStm   // parsed object streams, keyed by their obj num
+
+	// inFlight tracks objects currently being resolved so a self-referential
+	// /Length or a compressed object stream that hosts itself cannot drive
+	// resolve into infinite recursion (which would be a fatal stack overflow,
+	// not a recoverable panic).
+	inFlight map[int]bool
 }
 
 // objStm is a parsed PDF 1.5 object stream (/Type /ObjStm). pairs maps the

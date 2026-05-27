@@ -258,6 +258,11 @@ func (f *pdfFile) parseClassicXref(pos int) (pdfDict, int64, error) {
 
 // resolve dereferences an indirect reference. If v is a pdfRef it looks up and
 // parses the object (caching the result). Any other value is returned as-is.
+//
+// Cycles (an object whose body re-resolves the same object — e.g., a stream
+// whose /Length is a self-reference, or a compressed object stream that hosts
+// itself) are broken by the inFlight set: re-entry returns nil rather than
+// recursing into the unrecoverable stack-overflow case.
 func (f *pdfFile) resolve(v any) any {
 	ref, ok := v.(pdfRef)
 	if !ok {
@@ -267,6 +272,15 @@ func (f *pdfFile) resolve(v any) any {
 	if cached, found := f.cache[ref.num]; found {
 		return cached
 	}
+
+	if f.inFlight[ref.num] {
+		return nil
+	}
+	if f.inFlight == nil {
+		f.inFlight = map[int]bool{}
+	}
+	f.inFlight[ref.num] = true
+	defer delete(f.inFlight, ref.num)
 
 	obj, err := f.readObject(ref.num)
 	if err != nil {

@@ -5,9 +5,22 @@ import (
 	"strings"
 )
 
+// recoverAsError converts a panic in the calling deferred scope into an
+// error assigned to *errp. Used at every entry point that handles untrusted
+// PDF bytes — an index-out-of-range or makeslice-overflow in the parser
+// would otherwise terminate the host process instead of returning an error.
+// When no panic occurs, any prior value of *errp is preserved.
+func recoverAsError(errp *error) {
+	if r := recover(); r != nil {
+		*errp = fmt.Errorf("pdf: recovered from panic: %v", r)
+	}
+}
+
 // ExtractText opens a PDF file and returns all text content from all pages,
 // concatenated with newline separators between pages.
-func ExtractText(pdfPath string) (string, error) {
+func ExtractText(pdfPath string) (text string, err error) {
+	defer recoverAsError(&err)
+
 	pages, err := ExtractAllPages(pdfPath)
 	if err != nil {
 		return "", err
@@ -22,7 +35,9 @@ func ExtractText(pdfPath string) (string, error) {
 // Unsupported filter combinations (e.g. JBIG2Decode) are logged and skipped
 // rather than returned as errors, so a single odd image cannot poison an
 // otherwise-extractable document.
-func ExtractImages(pdfPath string) ([]Image, error) {
+func ExtractImages(pdfPath string) (images []Image, err error) {
+	defer recoverAsError(&err)
+
 	f, err := openPDF(pdfPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening PDF: %w", err)
@@ -33,7 +48,6 @@ func ExtractImages(pdfPath string) ([]Image, error) {
 		return nil, fmt.Errorf("getting pages: %w", err)
 	}
 
-	var images []Image
 	for i, ref := range pageRefs {
 		pageImages, err := f.extractPageImages(ref, i+1)
 		if err != nil {
@@ -47,7 +61,9 @@ func ExtractImages(pdfPath string) ([]Image, error) {
 
 // ExtractAllPages opens a PDF file and returns the extracted text for each
 // page, one string per page in document order.
-func ExtractAllPages(pdfPath string) ([]string, error) {
+func ExtractAllPages(pdfPath string) (pages []string, err error) {
+	defer recoverAsError(&err)
+
 	f, err := openPDF(pdfPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening PDF: %w", err)
@@ -58,7 +74,7 @@ func ExtractAllPages(pdfPath string) ([]string, error) {
 		return nil, fmt.Errorf("getting pages: %w", err)
 	}
 
-	pages := make([]string, 0, len(pageRefs))
+	pages = make([]string, 0, len(pageRefs))
 	for i, ref := range pageRefs {
 		text, err := f.extractPageText(ref)
 		if err != nil {

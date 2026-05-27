@@ -6,9 +6,22 @@ import (
 	"strconv"
 )
 
+// maxParseDepth caps recursion through parseValue/parseDict/parseArray so a
+// hostile PDF nesting `[[[[...]]]]` thousands of levels deep produces an
+// error instead of hitting Go's stack-growth ceiling (a fatal, unrecoverable
+// panic). Real-world PDFs nest in the low double digits.
+const maxParseDepth = 256
+
 // parseValue parses a single PDF value starting at pos in data.
 // It returns the parsed value and the position immediately after it.
 func parseValue(data []byte, pos int, f *pdfFile) (any, int, error) {
+	return parseValueDepth(data, pos, f, 0)
+}
+
+func parseValueDepth(data []byte, pos int, f *pdfFile, depth int) (any, int, error) {
+	if depth > maxParseDepth {
+		return nil, pos, fmt.Errorf("parser: exceeded max nesting depth %d at offset %d", maxParseDepth, pos)
+	}
 	pos = skipWhitespaceAndComments(data, pos)
 
 	if pos >= len(data) {
@@ -19,7 +32,7 @@ func parseValue(data []byte, pos int, f *pdfFile) (any, int, error) {
 
 	switch {
 	case ch == '<' && pos+1 < len(data) && data[pos+1] == '<':
-		return parseDict(data, pos, f)
+		return parseDict(data, pos, f, depth+1)
 
 	case ch == '<':
 		return parseHexString(data, pos)
@@ -28,7 +41,7 @@ func parseValue(data []byte, pos int, f *pdfFile) (any, int, error) {
 		return parseLiteralString(data, pos)
 
 	case ch == '[':
-		return parseArray(data, pos, f)
+		return parseArray(data, pos, f, depth+1)
 
 	case ch == '/':
 		return parseName(data, pos)
@@ -43,7 +56,7 @@ func parseValue(data []byte, pos int, f *pdfFile) (any, int, error) {
 		return pdfNull{}, pos + len("null"), nil
 
 	case ch == '+' || ch == '-' || ch == '.' || isDigit(ch):
-		return parseNumberOrRef(data, pos, f)
+		return parseNumberOrRef(data, pos, f, depth)
 
 	default:
 		return nil, pos, fmt.Errorf("unexpected character %q at offset %d", ch, pos)
@@ -51,7 +64,7 @@ func parseValue(data []byte, pos int, f *pdfFile) (any, int, error) {
 }
 
 // parseDict parses a PDF dictionary << /Key Value ... >>.
-func parseDict(data []byte, pos int, f *pdfFile) (pdfDict, int, error) {
+func parseDict(data []byte, pos int, f *pdfFile, depth int) (pdfDict, int, error) {
 	pos += 2 // skip <<
 	dict := pdfDict{}
 
@@ -76,7 +89,7 @@ func parseDict(data []byte, pos int, f *pdfFile) (pdfDict, int, error) {
 
 		pos = skipWhitespaceAndComments(data, pos)
 
-		val, newPos, err := parseValue(data, pos, f)
+		val, newPos, err := parseValueDepth(data, pos, f, depth)
 		if err != nil {
 			return nil, pos, fmt.Errorf("parsing dictionary value for key %q: %w", key, err)
 		}
@@ -87,7 +100,7 @@ func parseDict(data []byte, pos int, f *pdfFile) (pdfDict, int, error) {
 }
 
 // parseArray parses a PDF array [ ... ].
-func parseArray(data []byte, pos int, f *pdfFile) (pdfArray, int, error) {
+func parseArray(data []byte, pos int, f *pdfFile, depth int) (pdfArray, int, error) {
 	pos++ // skip [
 	arr := pdfArray{}
 
@@ -100,7 +113,7 @@ func parseArray(data []byte, pos int, f *pdfFile) (pdfArray, int, error) {
 			return arr, pos + 1, nil
 		}
 
-		val, newPos, err := parseValue(data, pos, f)
+		val, newPos, err := parseValueDepth(data, pos, f, depth)
 		if err != nil {
 			return nil, pos, fmt.Errorf("parsing array element: %w", err)
 		}
@@ -227,7 +240,7 @@ func parseHexString(data []byte, pos int) (pdfString, int, error) {
 
 // parseNumberOrRef parses an integer, float, or indirect reference (N G R).
 // It peeks ahead to distinguish bare numbers from references.
-func parseNumberOrRef(data []byte, pos int, f *pdfFile) (any, int, error) {
+func parseNumberOrRef(data []byte, pos int, f *pdfFile, depth int) (any, int, error) {
 	n1Str, newPos, err := readRawNumber(data, pos)
 	if err != nil {
 		return nil, pos, fmt.Errorf("parsing number: %w", err)
@@ -251,7 +264,7 @@ func parseNumberOrRef(data []byte, pos int, f *pdfFile) (any, int, error) {
 				if bytes.HasPrefix(data[peek2:], []byte("obj")) && isTokenEnd(data, peek2+3) {
 					peek2 += 3
 					peek2 = skipWhitespace(data, peek2)
-					val, afterVal, err3 := parseValue(data, peek2, f)
+					val, afterVal, err3 := parseValueDepth(data, peek2, f, depth+1)
 					if err3 != nil {
 						return nil, pos, fmt.Errorf("parsing inline object: %w", err3)
 					}
