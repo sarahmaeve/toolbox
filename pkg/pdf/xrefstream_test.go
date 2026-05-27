@@ -1,6 +1,9 @@
 package pdf
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestDecodeXrefStreamEntries_AllThreeKinds(t *testing.T) {
 	t.Parallel()
@@ -106,5 +109,84 @@ func TestDecodeXrefStreamEntries_FirstWriteWins(t *testing.T) {
 	}
 	if existing[3].offset != 0xDEAD {
 		t.Errorf("existing entry overwritten: got offset 0x%X, want 0xDEAD", existing[3].offset)
+	}
+}
+
+func TestDecodeXrefStreamEntries_RejectsOffsetExceedingInt64Max(t *testing.T) {
+	t.Parallel()
+
+	// /W [1 8 0]: 1 byte type, 8 byte offset, 0 byte gen.
+	// A hostile PDF can pack any uint64 in the offset slot; int64(MaxUint64)
+	// wraps to -1, downstream readUncompressedObject indexes data[-1] and
+	// panics. The api.go recover converts that to an opaque "panic
+	// recovered" error; a structural reject up front gives a clear message
+	// and matches the rest of the validator's vocabulary.
+	data := []byte{
+		0x01,                                           // type=1 uncompressed
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // offset=MaxUint64
+	}
+	into := map[int]xrefEntry{}
+	err := decodeXrefStreamEntries(data, [3]int{1, 8, 0}, [][2]int{{1, 1}}, into)
+	if err == nil {
+		t.Fatalf("expected error for offset=MaxUint64, got entry %+v", into[1])
+	}
+	if e := into[1]; e.kind == xrefUncompressed && e.offset < 0 {
+		t.Errorf("hostile uint64 silently wrapped to negative offset %d", e.offset)
+	}
+}
+
+func TestValidXrefOffset(t *testing.T) {
+	t.Parallel()
+
+	// Property: only non-negative integer values that fit in int64 are
+	// accepted. PDF spec says xref offsets are non-negative integers
+	// (§7.5.5, §7.5.8); a hostile float that's negative, NaN, Inf, or
+	// fractional must be rejected before it reaches downstream code that
+	// would index f.data[neg] and panic.
+	cases := []struct {
+		name   string
+		in     pdfNumber
+		wantOK bool
+		wantV  int64
+	}{
+		{"zero", 0, true, 0},
+		{"small positive", 1024, true, 1024},
+		{"large but valid", 1 << 40, true, 1 << 40},
+		{"negative", -1, false, 0},
+		{"fractional", 3.14, false, 0},
+		{"NaN", pdfNumber(math.NaN()), false, 0},
+		{"positive infinity", pdfNumber(math.Inf(1)), false, 0},
+		{"negative infinity", pdfNumber(math.Inf(-1)), false, 0},
+		{"beyond int64", pdfNumber(1e19), false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := validXrefOffset(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("ok: got %v, want %v", ok, tc.wantOK)
+			}
+			if ok && got != tc.wantV {
+				t.Errorf("value: got %d, want %d", got, tc.wantV)
+			}
+		})
+	}
+}
+
+func TestDecodeXrefStreamEntries_RejectsCompressedStreamNumOverflow(t *testing.T) {
+	t.Parallel()
+
+	// Same shape but for the compressed-kind entry where fields[1] becomes
+	// objStmNum (an int). On 64-bit Go a uint64 > MaxInt64 wraps to
+	// negative; objStmNum is later used as a map key whose lookups silently
+	// return zero values.
+	data := []byte{
+		0x02,                                           // type=2 compressed
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // objStmNum=MaxUint64
+	}
+	into := map[int]xrefEntry{}
+	err := decodeXrefStreamEntries(data, [3]int{1, 8, 0}, [][2]int{{1, 1}}, into)
+	if err == nil {
+		t.Fatalf("expected error for objStmNum=MaxUint64, got entry %+v", into[1])
 	}
 }

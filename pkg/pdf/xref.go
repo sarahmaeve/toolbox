@@ -3,11 +3,32 @@ package pdf
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 )
 
 const maxPDFSize = 100 * 1024 * 1024 // 100 MB
+
+// validXrefOffset extracts a non-negative integer offset from a pdfNumber
+// (a float64 under the hood). Per PDF 1.7 §7.5.5/§7.5.8 cross-reference
+// offsets must be non-negative integers; a hostile file can encode any
+// float, and Go's float→int64 conversion is implementation-defined for
+// out-of-range values. Reject NaN/Inf, negatives, fractionals, and
+// anything that doesn't fit cleanly in int64.
+func validXrefOffset(n pdfNumber) (int64, bool) {
+	v := float64(n)
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	if v < 0 || v > math.MaxInt64 {
+		return 0, false
+	}
+	if v != math.Trunc(v) {
+		return 0, false
+	}
+	return int64(v), true
+}
 
 // openPDF reads the entire PDF file into memory, verifies the header, parses
 // the cross-reference table(s) and trailer, and returns a ready-to-use file.
@@ -83,7 +104,10 @@ func (f *pdfFile) parseXref() error {
 		// Some PDFs reference a hybrid xref stream via /XRefStm in the trailer.
 		if xrefStm, ok := trailer["XRefStm"]; ok {
 			if n, ok := xrefStm.(pdfNumber); ok {
-				stmOff := int64(n)
+				stmOff, ok := validXrefOffset(n)
+				if !ok {
+					return fmt.Errorf("invalid /XRefStm offset %v", float64(n))
+				}
 				if !visited[stmOff] {
 					visited[stmOff] = true
 					offsets = append(offsets, stmOff)
@@ -250,7 +274,11 @@ func (f *pdfFile) parseClassicXref(pos int) (pdfDict, int64, error) {
 
 	var prev int64
 	if p, ok := trailer["Prev"].(pdfNumber); ok {
-		prev = int64(p)
+		v, ok := validXrefOffset(p)
+		if !ok {
+			return nil, 0, fmt.Errorf("invalid /Prev offset %v", float64(p))
+		}
+		prev = v
 	}
 
 	return trailer, prev, nil

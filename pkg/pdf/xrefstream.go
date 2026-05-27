@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"math"
 )
 
 // parseXrefStreamAt parses an indirect object at offset whose stream is a
@@ -71,7 +72,11 @@ func (f *pdfFile) parseXrefStreamAt(offset int) (pdfDict, int64, error) {
 
 	var prev int64
 	if p, ok := dict["Prev"].(pdfNumber); ok {
-		prev = int64(p)
+		v, ok := validXrefOffset(p)
+		if !ok {
+			return nil, 0, fmt.Errorf("invalid /Prev offset %v in xref-stream", float64(p))
+		}
+		prev = v
 	}
 
 	return dict, prev, nil
@@ -133,11 +138,17 @@ func decodeXrefStreamEntries(data []byte, w [3]int, index [][2]int, into map[int
 			case 0:
 				// Free object — not recorded.
 			case 1:
+				if fields[1] > math.MaxInt64 {
+					return fmt.Errorf("xref-stream entry %d: offset %d exceeds int64 range", objNum, fields[1])
+				}
 				into[objNum] = xrefEntry{
 					kind:   xrefUncompressed,
 					offset: int64(fields[1]),
 				}
 			case 2:
+				if fields[1] > math.MaxInt32 || fields[2] > math.MaxInt32 {
+					return fmt.Errorf("xref-stream entry %d: compressed-objstm fields %d/%d exceed int32 range", objNum, fields[1], fields[2])
+				}
 				into[objNum] = xrefEntry{
 					kind:      xrefCompressed,
 					objStmNum: int(fields[1]),

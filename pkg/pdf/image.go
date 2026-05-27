@@ -538,6 +538,13 @@ func wrapCCITTAsTIFF(payload []byte, width, height int, parms pdfDict) ([]byte, 
 	}
 	cols := width
 	if v, ok := parms["Columns"].(pdfNumber); ok {
+		// /Columns is independent of /Width and not constrained by the
+		// pixel-area check above. Reject values that would silently wrap
+		// when cast to the uint32 TIFF ImageWidth tag or that would
+		// exceed the same pixel ceiling we apply to width.
+		if v < 0 || v > maxImagePixels {
+			return nil, fmt.Errorf("CCITT /Columns %v out of range", float64(v))
+		}
 		cols = int(v)
 	}
 	blackIs1 := false

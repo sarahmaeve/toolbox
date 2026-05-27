@@ -59,6 +59,22 @@ func TestWrapCCITTAsTIFF_RejectsHostileDimensions(t *testing.T) {
 	}
 }
 
+func TestWrapCCITTAsTIFF_RejectsHostileColumnsOverride(t *testing.T) {
+	t.Parallel()
+
+	// CCITTFaxDecode /DecodeParms /Columns is a separate field from /Width.
+	// A PDF can declare Width=100, Height=100 (passes the pixel-area cap)
+	// but DecodeParms /Columns = 5_000_000_000 (overrides cols and silently
+	// wraps to uint32(5e9 mod 2^32) ≈ 705M in the TIFF header). The TIFF
+	// becomes nonsense and downstream renderers may misallocate buffers
+	// trusting the header. Reject when /Columns exceeds the pixel cap.
+	parms := pdfDict{"Columns": pdfNumber(5_000_000_000)}
+	_, err := wrapCCITTAsTIFF([]byte{0x00}, 100, 100, parms)
+	if err == nil {
+		t.Fatal("expected error for hostile /Columns override, got nil")
+	}
+}
+
 func TestImageFromStream_DCTDecodePassthrough(t *testing.T) {
 	t.Parallel()
 
