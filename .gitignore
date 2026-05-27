@@ -39,6 +39,7 @@ bin/
 # `go build ./cmd/toolbox-*` invocations run from the repo root.
 /toolbox-bridge
 /toolbox-mcp
+/toolbox-pdf
 
 # Local MCP config (use .mcp.json.example as the template)
 .mcp.json

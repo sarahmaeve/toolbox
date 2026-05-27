@@ -11,23 +11,25 @@ pkg/
   messagestore/     SQLite-backed sessions + messages with a MessageType registry
   bridge/           localhost HTTPS server + Go client over the messagestore
   certs/            mkcert CA bootstrap + shell profile patching
+  pdf/              stdlib-only PDF 1.4–1.7 text + image extractor
+  pdfclean/         post-process extracted text into a markdown working copy
 cmd/
   toolbox-bridge/   HTTPS bridge + init/doctor/lifecycle commands
-  toolbox-mcp/      MCP-over-stdio server exposing the messagestore as tools
+  toolbox-mcp/      MCP-over-stdio server exposing the messagestore + PDF as tools
+  toolbox-pdf/      consolidated CLI for PDF dump / images / clean
 ```
 
 Each package is independently consumable. Dependencies flow downward:
 
 ```
-                          bridge          (HTTPS layer)
-                           │  ╲
-                  ┌────────┘   ╲
-                  ▼             ▼
-            messagestore     certs        (persistence + TLS trust)
-                  │
-                  ▼
-               schema                     (foundational validator)
-                                          mcp (independent; uses schema)
+   bridge       (HTTPS layer)               toolbox-pdf
+    │  ╲                                        │
+    │   ╲                                       ▼
+    ▼    ▼                              pdf  ←  pdfclean
+ messagestore  certs                    (stdlib-only PDF stack)
+    │
+    ▼
+  schema                                 mcp (independent; uses schema)
 ```
 
 ## What you get
@@ -38,6 +40,7 @@ Each package is independently consumable. Dependencies flow downward:
 - **MCP server framework** with strict-reject schema validation (`additionalProperties:false`), oversize-frame recovery, race-safe lifecycle handshake, uniform `Response{Status, Data, Error, Metadata}` envelope.
 - **Pull-based coordination**: no event bus, no fan-out delivery semantics. Producers `DepositMessage`; consumers `GetLatestMessage` / `GetMessages` with optional `role` / `sender_id` / `type` / `subject_id` filters.
 - **Day-one ergonomics**: `init` bootstraps a fresh machine; `doctor` reports breadth-first on local health; `serve start/stop/restart/status` runs the bridge as a managed daemon.
+- **PDF processing**: stdlib-only PDF 1.4–1.7 parser that handles compressed cross-reference streams and object streams (common in government/military publications). Extracts text per-page and images as XObjects with bounding boxes, with optional adjacency-based panel stitching for multi-panel figures. The `pdfclean` companion turns raw extracted text into a markdown working copy.
 
 ## Default paths
 
@@ -90,6 +93,26 @@ toolbox-bridge version
 ```
 
 `toolbox-mcp` is stdio-only — its lifecycle is owned by the MCP client (Claude Code spawns and reaps it). See `.mcp.json.example` for wiring.
+
+```
+toolbox-pdf dump   [-page N | -pages N-M] <file.pdf>
+toolbox-pdf images [-out DIR] [-page N | -pages N-M] [-no-stitch] [-stitch-tol PT] <file.pdf>
+toolbox-pdf clean  [-manifest path -imgdir relpath] <input.txt> <output.md>
+toolbox-pdf version
+```
+
+## PDF processing
+
+Three operations on digital PDFs (text-based, PDF 1.4–1.7, including compressed cross-reference streams and object streams). Scanned PDFs using JBIG2 are not supported — fall back to Poppler's `pdfimages` for those.
+
+```bash
+toolbox-pdf dump my.pdf > raw.txt                           # extract text
+toolbox-pdf images -out ./images my.pdf                     # extract images + manifest.tsv
+toolbox-pdf clean -manifest ./images/manifest.tsv \
+                  -imgdir images raw.txt clean.md           # markdown working copy
+```
+
+The same operations are exposed as MCP tools (`pdf_extract_text`, `pdf_extract_pages`, `pdf_extract_images`, `pdf_clean_text`) so a Claude Code session can drive them inline. `pdf_extract_images` writes files to disk and returns the manifest — never image bytes — so a 200-page document with hundreds of figures doesn't blow up an MCP frame.
 
 ## MCP integration with Claude Code
 

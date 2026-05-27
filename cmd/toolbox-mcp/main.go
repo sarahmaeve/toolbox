@@ -115,6 +115,9 @@ func main() {
 	for _, t := range buildTools(store) {
 		srv.Register(t)
 	}
+	for _, t := range buildPDFTools() {
+		srv.Register(t)
+	}
 
 	slog.Info("toolbox-mcp ready",
 		"version", version,

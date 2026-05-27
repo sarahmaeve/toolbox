@@ -33,7 +33,7 @@ LDFLAGS       := -X main.version=$(VERSION) \
                  -X main.commit=$(COMMIT) \
                  -X main.buildDate=$(BUILD_DATE)
 
-BINARIES      := toolbox-bridge toolbox-mcp
+BINARIES      := toolbox-bridge toolbox-mcp toolbox-pdf
 
 .PHONY: all
 all: check
