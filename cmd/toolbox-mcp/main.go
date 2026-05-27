@@ -35,6 +35,7 @@ import (
 
 	"github.com/sarahmaeve/toolbox/pkg/mcp"
 	"github.com/sarahmaeve/toolbox/pkg/messagestore"
+	"github.com/sarahmaeve/toolbox/pkg/messagetypes"
 	"github.com/sarahmaeve/toolbox/pkg/schema"
 )
 
@@ -97,13 +98,23 @@ func main() {
 	}
 	defer store.Close() //nolint:errcheck
 
+	// Built-in canonical types first; --schemas-dir extras layer on
+	// top but cannot redefine these names.
+	for _, mt := range messagetypes.Builtin() {
+		if err := store.RegisterType(mt); err != nil {
+			fmt.Fprintf(os.Stderr, "register built-in %q: %v\n", mt.Name, err)
+			os.Exit(1)
+		}
+	}
+	slog.Info("registered built-in message types", "count", len(messagetypes.Builtin()))
+
 	if *schemasDir != "" {
 		n, err := loadSchemasDir(store, *schemasDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "load schemas: %v\n", err)
 			os.Exit(1)
 		}
-		slog.Info("registered message types", "count", n, "dir", *schemasDir)
+		slog.Info("registered user message types", "count", n, "dir", *schemasDir)
 	}
 
 	srv := mcp.NewServer(mcp.ServerConfig{
@@ -146,6 +157,7 @@ func buildTools(store *messagestore.Store) []mcp.Tool {
 		&getSessionTool{store: store},
 		&getMessagesTool{store: store},
 		&getLatestMessageTool{store: store},
+		&listTasksTool{store: store},
 	}
 }
 
@@ -427,6 +439,68 @@ func (t *getLatestMessageTool) Handle(ctx context.Context, input json.RawMessage
 		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
 	}
 	return mcp.OK(msg)
+}
+
+// --- list_tasks ---
+
+type listTasksTool struct{ store *messagestore.Store }
+
+func (listTasksTool) Name() string { return "list_tasks" }
+func (listTasksTool) Description() string {
+	return "Return one entry per task — the current state of each, " +
+		"deduplicated across history. Optional status filter narrows " +
+		"to e.g. only \"new\" tasks; optional limit caps the result. " +
+		"Each entry's content carries the full task payload (title, " +
+		"status, priority, assignee, notes, blocker)."
+}
+func (listTasksTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"status": {"type": "string", "enum": ["new", "in-progress", "done", "abandoned"]},
+			"limit":  {"type": "integer", "minimum": 1, "maximum": 500}
+		},
+		"additionalProperties": false
+	}`)
+}
+func (t *listTasksTool) Handle(ctx context.Context, input json.RawMessage) *mcp.Response {
+	var p struct {
+		Status string `json:"status"`
+		Limit  int    `json:"limit"`
+	}
+	if err := json.Unmarshal(input, &p); err != nil {
+		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
+	}
+	msgs, err := t.store.LatestPerSubject(ctx, messagestore.MessageFilter{
+		Type:  "task",
+		Limit: p.Limit,
+	})
+	if err != nil {
+		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
+	}
+	// Optional status filter is applied AFTER LatestPerSubject so we
+	// pick the latest state per subject and then narrow — the
+	// alternative ("latest with status=new") would miss tasks whose
+	// most recent update flipped them out of "new".
+	if p.Status != "" {
+		filtered := msgs[:0]
+		for _, m := range msgs {
+			var c struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(m.Content, &c); err != nil {
+				continue
+			}
+			if c.Status == p.Status {
+				filtered = append(filtered, m)
+			}
+		}
+		msgs = filtered
+	}
+	if msgs == nil {
+		msgs = []messagestore.Message{}
+	}
+	return mcp.OK(msgs)
 }
 
 // --- helpers ---------------------------------------------------------------

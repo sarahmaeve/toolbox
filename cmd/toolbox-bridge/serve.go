@@ -18,6 +18,7 @@ import (
 
 	"github.com/sarahmaeve/toolbox/pkg/bridge"
 	"github.com/sarahmaeve/toolbox/pkg/messagestore"
+	"github.com/sarahmaeve/toolbox/pkg/messagetypes"
 	"github.com/sarahmaeve/toolbox/pkg/schema"
 )
 
@@ -121,6 +122,18 @@ func runServeRun(args []string) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer store.Close() //nolint:errcheck
+
+	// Register canonical built-in types BEFORE applying --schemas-dir
+	// so a user file cannot redefine (or shadow) them. RegisterType
+	// returns ErrTypeAlreadyRegistered on a collision; we surface
+	// any other failure as fatal since a built-in failing to register
+	// indicates a programmer error in pkg/messagetypes.
+	for _, mt := range messagetypes.Builtin() {
+		if err := store.RegisterType(mt); err != nil {
+			return fmt.Errorf("register built-in %q: %w", mt.Name, err)
+		}
+	}
+	slog.Info("registered built-in message types", "count", len(messagetypes.Builtin()))
 
 	if cfg.schemasDir != "" {
 		n, err := loadSchemasDir(store, cfg.schemasDir)

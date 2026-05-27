@@ -9,6 +9,7 @@ pkg/
   schema/           narrow JSON Schema 2020-12 validator; structured *Violation
   mcp/              JSON-RPC 2.0 / MCP 2025-11-25 server framework
   messagestore/     SQLite-backed sessions + messages with a MessageType registry
+  messagetypes/     canonical MessageTypes baked into the binaries (e.g. task)
   bridge/           localhost HTTPS server + Go client over the messagestore
   certs/            mkcert CA bootstrap + shell profile patching
   pdf/              stdlib-only PDF 1.4–1.7 text + image extractor
@@ -145,9 +146,51 @@ cp .mcp.json.example /your/project/.mcp.json
 # (Claude Code does not expand ~ or $HOME — paths must be absolute)
 ```
 
-The toolbox MCP server registers ten tools total: six over the messagestore (`create_session`, `deposit_message`, `list_sessions`, `get_session`, `get_messages`, `get_latest_message`) and four over the PDF stack (`pdf_extract_text`, `pdf_extract_pages`, `pdf_extract_images`, `pdf_clean_text`). All payload schemas are loaded from `--schemas-dir` at startup; the registry is in-memory per process. The bridge daemon and the MCP server share the same SQLite database by default, so messages deposited via one are immediately visible via the other.
+The toolbox MCP server registers eleven tools total: seven over the messagestore (`create_session`, `deposit_message`, `list_sessions`, `get_session`, `get_messages`, `get_latest_message`, `list_tasks`) and four over the PDF stack (`pdf_extract_text`, `pdf_extract_pages`, `pdf_extract_images`, `pdf_clean_text`). The bridge daemon and the MCP server share the same SQLite database by default, so messages deposited via one are immediately visible via the other.
 
 `get_messages` and `get_latest_message` accept either `session_id` (in-session lookup) or one of `sender_id` / `subject_id` / `role` / `type` (cross-session search). The cross-session mode is the memory-aid path — `get_messages(subject_id="ticket-1234")` returns every digest ever deposited about that topic, regardless of which run produced it. The bridge enforces "at least one filter set" so an empty query never sweeps the whole log; the error message names the acceptable filter fields so an LLM client can self-correct.
+
+## Built-in MessageTypes
+
+Both binaries register a canonical set of MessageTypes at startup (see `pkg/messagetypes`). Schemas and semantic rules are baked into the binary in Go — a user editing JSON in `--schemas-dir` cannot redefine or shadow them. This is deliberate: anything we want agents to use **the same way every time** lives in code, not in a file an agent might also be able to write to.
+
+### `task`
+
+The first canonical type. One message per state transition, keyed by `subject_id`; the latest message wins as "current state"; the full history is the message stream.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `title` | string | yes | human-readable summary |
+| `status` | enum | yes | `new`, `in-progress`, `done`, `abandoned` |
+| `priority` | integer 0–5 | no | |
+| `assignee` | string | no | conventional; not validated |
+| `notes` | string | no | free-form annotation on this transition |
+| `blocker` | string | no | what's holding the task, if status=in-progress |
+
+`additionalProperties:false`, so unknown fields are rejected with the field name in the error. Status is enum-validated by `pkg/schema`; the rejection lists every acceptable enum value:
+
+```
+field "status" in input for task: value "started" not in enum [abandoned, done, in-progress, new]
+```
+
+That error is the documentation. An agent that picks the wrong value self-corrects in one turn — no source-code access, no docs lookup.
+
+**Usage patterns** that fall out of the design:
+
+- *Create a task:* `deposit_message(type="task", subject_id="ship-the-thing", content={"title": "...", "status": "new"})`. The subject_id is the task's stable identifier across all its messages.
+- *Update status:* deposit another task message with the same subject_id and the new status. Optionally include `notes` explaining the transition.
+- *Current state of one task:* `get_latest_message(subject_id=<task>, type="task")`.
+- *Full audit trail:* `get_messages(subject_id=<task>, type="task")` returns every transition in order.
+- *Queue view:* the `list_tasks` MCP tool returns one entry per task (deduplicated across history) with optional `status` filter — "what's currently new?", "what's in flight?", "what shipped recently?".
+
+The self-documenting-error contract extends to ingest-layer rejections too:
+
+```
+ErrUnknownRole: "imposter"; allowed roles: [agent, orchestrator, user]
+ErrUnknownType: "task.completed"; registered types: [task]
+```
+
+An agent encountering either error sees the legitimate vocabulary inline and corrects on the next call.
 
 ## Running the bridge under launchd (macOS)
 
