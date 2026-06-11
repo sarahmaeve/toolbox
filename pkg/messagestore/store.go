@@ -61,6 +61,12 @@ var (
 	// posture is that unknown fields are an error; permissive schemas
 	// are refused at registration.
 	ErrSchemaNotStrict = errors.New("schema must set additionalProperties:false")
+
+	// ErrActiveSessionLimit is returned by CreateSession when
+	// Config.MaxActiveSessions is configured and already reached.
+	// Callers (e.g. the bridge) branch on this to distinguish the one
+	// expected create failure from genuine internal errors.
+	ErrActiveSessionLimit = errors.New("active session limit reached")
 )
 
 // Config configures a Store at Open.
@@ -228,6 +234,19 @@ func (s *Store) LookupType(name string) *MessageType {
 	return s.types[name]
 }
 
+// dbTimeFormat is the serialization format for created_at TEXT columns.
+// Every read path orders by created_at lexically, so the format must
+// keep lexical order identical to chronological order. RFC3339Nano is
+// NOT that format: it trims trailing fractional zeros, so an instant on
+// a whole second renders "...05Z" while a later one renders "...05.5Z",
+// and '.' < 'Z' byte-wise — the later row sorts earlier. The ".000000000"
+// layout always emits all nine fraction digits (fixed width); the scan
+// paths keep parsing with RFC3339Nano, which accepts both this format
+// and rows written by earlier versions. (Old whole-second rows can still
+// mis-sort against new fractional rows in pre-existing databases; only a
+// data migration would heal those.)
+const dbTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
 // --- Sessions ---
 
 // CountActiveSessions returns the count of sessions in "active" status.
@@ -251,7 +270,7 @@ func (s *Store) CreateSession(ctx context.Context, target, metadata string) (*Se
 			return nil, err
 		}
 		if count >= s.maxActiveSessions {
-			return nil, fmt.Errorf("active session limit reached (%d); delete old sessions first", s.maxActiveSessions)
+			return nil, fmt.Errorf("%w (%d); delete old sessions first", ErrActiveSessionLimit, s.maxActiveSessions)
 		}
 	}
 
@@ -266,7 +285,7 @@ func (s *Store) CreateSession(ctx context.Context, target, metadata string) (*Se
 		`INSERT INTO sessions (id, target, status, created_at, metadata)
 		 VALUES (?, ?, ?, ?, ?)`,
 		sess.ID, sess.Target, sess.Status,
-		sess.CreatedAt.Format(time.RFC3339Nano), nullableString(sess.Metadata),
+		sess.CreatedAt.Format(dbTimeFormat), nullableString(sess.Metadata),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -405,7 +424,7 @@ func (s *Store) DepositMessage(ctx context.Context, msg *Message) (*Message, err
 		msg.SessionID, msg.Role, nullableString(msg.SenderID),
 		msg.Type, nullableString(msg.SubjectID),
 		string(msg.Content),
-		msg.CreatedAt.Format(time.RFC3339Nano), nullableString(msg.Metadata),
+		msg.CreatedAt.Format(dbTimeFormat), nullableString(msg.Metadata),
 	)
 	if err != nil {
 		if isForeignKeyFailure(err) {

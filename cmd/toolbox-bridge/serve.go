@@ -302,6 +302,15 @@ func runServeStop(args []string) error {
 		return fmt.Errorf("find process %d: %w", pid, err)
 	}
 
+	// Identity check before signaling: a reboot recycles PIDs, and the
+	// pidfile survives reboots. Never signal a process that doesn't
+	// identify as a toolbox-bridge.
+	if cmd := processCommand(pid); cmd != "" && !looksLikeBridge(cmd) {
+		_ = os.Remove(resolved) //nolint:errcheck
+		fmt.Printf("not running (pid %d was recycled by %q); cleaned stale pidfile\n", pid, cmd)
+		return nil
+	}
+
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
 			_ = os.Remove(resolved) //nolint:errcheck
@@ -343,17 +352,20 @@ func runServeRestart(args []string) error {
 	return runServeStart(args)
 }
 
-// extractFlag picks the value of --name from a freeform args slice,
-// supporting both `--name=value` and `--name value` forms. Returns
-// fallback when the flag is absent.
+// extractFlag picks the value of the named flag from a freeform args
+// slice, supporting `-name value`, `--name value`, `-name=value`, and
+// `--name=value` — Go's flag package treats single and double dashes
+// identically, so this scanner must too. Returns fallback when the
+// flag is absent.
 func extractFlag(args []string, name, fallback string) string {
-	prefix := "--" + name
 	for i, a := range args {
-		if a == prefix && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(a, prefix+"=") {
-			return a[len(prefix)+1:]
+		for _, prefix := range []string{"--" + name, "-" + name} {
+			if a == prefix && i+1 < len(args) {
+				return args[i+1]
+			}
+			if strings.HasPrefix(a, prefix+"=") {
+				return a[len(prefix)+1:]
+			}
 		}
 	}
 	return fallback
@@ -392,13 +404,25 @@ func runServeStatus(args []string) error {
 		fmt.Printf("not running (pid %d not alive); pidfile is stale\n", pid)
 		return nil
 	}
+	if cmd := processCommand(pid); cmd != "" && !looksLikeBridge(cmd) {
+		fmt.Printf("not running (pid %d recycled by another process); pidfile is stale\n", pid)
+		return nil
+	}
 	fmt.Printf("running (pid %d)\n", pid)
 	return nil
 }
 
 // readLivePID returns the PID stored in path and whether the process
-// is alive. (-1, false) when the PID file is missing or the process
-// is gone.
+// is alive AND identifies as a toolbox-bridge. (-1, false) when the PID
+// file is missing; (pid, false) when the process is gone or belongs to
+// something else.
+//
+// The identity check matters because the pidfile lives under
+// ~/.toolbox/run and survives reboots: after a reboot the stored PID is
+// likely recycled to an unrelated same-user process, and Signal(0)
+// succeeding only proves *some* process holds the number. Without the
+// check, `serve start` refuses to run and steers the user toward
+// `serve stop` — which would SIGTERM (then SIGKILL) an innocent process.
 func readLivePID(path string) (int, bool) {
 	pid, err := readPIDFile(path)
 	if err != nil {
@@ -411,7 +435,34 @@ func readLivePID(path string) (int, bool) {
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		return pid, false
 	}
+	// Unknown identity (ps unavailable / racing exit) is conservatively
+	// treated as the bridge: a false "not running" would let `serve
+	// start` clobber a live daemon's pidfile.
+	if cmd := processCommand(pid); cmd != "" && !looksLikeBridge(cmd) {
+		return pid, false
+	}
 	return pid, true
+}
+
+// processCommand returns pid's command line, or "" when it cannot be
+// determined. Linux reads /proc directly; macOS (no procfs) shells out
+// to ps.
+func processCommand(pid int) string {
+	if raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		return strings.ReplaceAll(strings.TrimRight(string(raw), "\x00"), "\x00", " ")
+	}
+	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// looksLikeBridge reports whether a command line plausibly belongs to a
+// toolbox-bridge daemon. Substring match: the daemon may run via any
+// install path, and launchd/systemd wrappers prepend interpreters.
+func looksLikeBridge(command string) bool {
+	return strings.Contains(command, "toolbox-bridge")
 }
 
 // readPIDFile returns the PID stored at path. Returns os.ErrNotExist

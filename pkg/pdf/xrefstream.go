@@ -95,6 +95,17 @@ func (f *pdfFile) parseXrefStreamAt(offset int) (pdfDict, int64, error) {
 //
 // When w[0] == 0 the type defaults to 1 per spec.
 func decodeXrefStreamEntries(data []byte, w [3]int, index [][2]int, into map[int]xrefEntry) error {
+	// Hostile /W widths: negative slices data out of bounds below; over 8
+	// silently overflows readBE's uint64 accumulator, decoding a wrong but
+	// plausible value — silent corruption rather than an error. Per
+	// §7.5.8.2 each field width is a non-negative integer, and 8 bytes is
+	// the widest meaningful field. Validating here also keeps entryLen
+	// overflow-proof (≤ 24).
+	for k := range 3 {
+		if w[k] < 0 || w[k] > 8 {
+			return fmt.Errorf("xref-stream /W[%d] width %d out of range [0, 8]", k, w[k])
+		}
+	}
 	entryLen := w[0] + w[1] + w[2]
 	if entryLen == 0 {
 		return fmt.Errorf("xref-stream /W widths all zero")

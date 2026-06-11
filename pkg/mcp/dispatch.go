@@ -180,18 +180,40 @@ func (s *Server) dispatchToolsCall(ctx context.Context, rawParams json.RawMessag
 		return nil, &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf("unknown tool: %s", p.Name)}
 	}
 
+	start := time.Now()
+	var resp *Response
 	if sch != nil {
 		if v := sch.Validate(p.Name, p.Arguments); v != nil {
-			return wrapHandlerResponse(violationToResponse(v)), nil
+			resp = violationToResponse(v)
 		}
 	}
-
-	start := time.Now()
-	resp := tool.Handle(ctx, p.Arguments)
+	if resp == nil {
+		resp = safeHandle(ctx, tool, p.Arguments)
+	}
+	// Stamp at emission time — for every envelope, including schema
+	// violations that never reached the handler (interfaces.go documents
+	// this contract on ResponseMetadata).
 	resp.Metadata.ElapsedMs = time.Since(start).Milliseconds()
 	resp.Metadata.ServerVersion = s.version
 
 	return wrapHandlerResponse(resp), nil
+}
+
+// safeHandle invokes tool.Handle, converting a panicking or
+// nil-returning handler into an internal_error Response. Handlers parse
+// untrusted LLM-supplied arguments and run on goroutines with no other
+// recover boundary — one buggy tool must not take down the process.
+func safeHandle(ctx context.Context, tool Tool, args json.RawMessage) (resp *Response) {
+	defer func() {
+		if r := recover(); r != nil {
+			resp = Err(CodeInternalError, fmt.Sprintf("tool handler panic: %v", r), nil)
+		}
+	}()
+	resp = tool.Handle(ctx, args)
+	if resp == nil {
+		resp = Err(CodeInternalError, "tool handler returned nil response", nil)
+	}
+	return resp
 }
 
 // violationToResponse maps a schema.Violation into the MCP Response

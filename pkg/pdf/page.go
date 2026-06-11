@@ -5,6 +5,13 @@ import (
 	"log"
 )
 
+// maxPageTreeDepth caps page-tree recursion. Legitimate trees are shallow
+// (a balanced tree over a million pages needs depth < 8); a hostile file
+// can chain /Pages nodes deep enough that recursion exhausts the goroutine
+// stack — a fatal runtime error recoverAsError cannot catch, unlike the
+// recoverable panics the rest of the parser is hardened against.
+const maxPageTreeDepth = 256
+
 // getPages walks the PDF page tree and returns refs to all page objects in
 // order.
 func (f *pdfFile) getPages() ([]pdfRef, error) {
@@ -16,11 +23,25 @@ func (f *pdfFile) getPages() ([]pdfRef, error) {
 	if pages == nil {
 		return nil, fmt.Errorf("no /Pages in root")
 	}
-	return f.collectPages(pages), nil
+	visited := map[int]bool{}
+	if ref, ok := root["Pages"].(pdfRef); ok {
+		visited[ref.num] = true
+	}
+	return f.collectPages(pages, visited, 0), nil
 }
 
 // collectPages recursively walks the page tree, collecting leaf page refs.
-func (f *pdfFile) collectPages(node pdfDict) []pdfRef {
+// visited holds object numbers already walked: resolve's inFlight guard
+// only covers in-progress resolution, so a /Kids entry referencing an
+// ancestor comes back as a cached dict and would otherwise recurse forever
+// (or, with duplicated kids, blow up exponentially — each node is walked
+// once, which is also correct extraction: a page has exactly one /Parent).
+// depth backstops linear chains too deep for the stack; nodes beyond
+// maxPageTreeDepth are dropped.
+func (f *pdfFile) collectPages(node pdfDict, visited map[int]bool, depth int) []pdfRef {
+	if depth >= maxPageTreeDepth {
+		return nil
+	}
 	nodeType := f.getName(node["Type"])
 	if nodeType == "Page" {
 		// Caller should have descended into a Pages node; nothing to return.
@@ -33,6 +54,10 @@ func (f *pdfFile) collectPages(node pdfDict) []pdfRef {
 		if !ok {
 			continue
 		}
+		if visited[ref.num] {
+			continue
+		}
+		visited[ref.num] = true
 		kidObj := f.getDict(kid)
 		if kidObj == nil {
 			continue
@@ -42,7 +67,7 @@ func (f *pdfFile) collectPages(node pdfDict) []pdfRef {
 		case "Page":
 			refs = append(refs, ref)
 		case "Pages":
-			refs = append(refs, f.collectPages(kidObj)...)
+			refs = append(refs, f.collectPages(kidObj, visited, depth+1)...)
 		}
 	}
 	return refs

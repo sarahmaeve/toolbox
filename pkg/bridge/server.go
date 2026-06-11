@@ -129,9 +129,14 @@ func (s *Server) ListenAndServe(ctx context.Context, port int, certFile, keyFile
 		Addr:              addr,
 		Handler:           s.mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		BaseContext:       func(_ net.Listener) context.Context { return ctx },
+		// ReadTimeout bounds the whole request including the body —
+		// without it a client trickling a deposit body pins a handler
+		// goroutine (and the store's single DB connection) indefinitely.
+		// Matches WriteTimeout so both directions agree when to give up.
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		BaseContext:  func(_ net.Listener) context.Context { return ctx },
 	}
 
 	// Graceful shutdown on ctx cancel. The shutdown context is rooted
@@ -200,10 +205,16 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	sess, err := s.store.CreateSession(r.Context(), req.Target, req.Metadata)
 	if err != nil {
-		// CreateSession's session-cap path is the only expected
-		// non-internal failure; surface its message.
 		s.logger.Error("create session", "error", err)
-		writeError(w, http.StatusServiceUnavailable, "%s", err.Error())
+		// The session cap is the only expected non-internal failure; its
+		// message is safe and self-documenting. Anything else is an
+		// internal error whose text (driver detail, file paths) must not
+		// reach the client.
+		if errors.Is(err, messagestore.ErrActiveSessionLimit) {
+			writeError(w, http.StatusServiceUnavailable, "%s", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

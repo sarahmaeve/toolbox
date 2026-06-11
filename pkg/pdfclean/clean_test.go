@@ -245,6 +245,31 @@ func TestParseManifest_RejectsPathTraversal(t *testing.T) {
 	}
 }
 
+func TestParseManifest_RejectsShortRow(t *testing.T) {
+	t.Parallel()
+
+	// A data row with fewer fields than the header must be a parse error,
+	// not an index-out-of-range panic on row[col["name"]]. csv's
+	// FieldsPerRecord enforcement reports the line number for free.
+	cases := []struct {
+		name string
+		tsv  string
+	}{
+		{"one field", "file\tpage\tname\na.png\n"},
+		{"two fields", "file\tpage\tname\na.png\t4\n"},
+		{"short middle row", "file\tpage\tname\na.png\t4\tIm0\nb.png\nc.png\t6\tIm2\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseManifest(strings.NewReader(tc.tsv))
+			if err == nil {
+				t.Error("expected error for short manifest row, got nil")
+			}
+		})
+	}
+}
+
 func TestParseManifest_AcceptsPlainBasename(t *testing.T) {
 	t.Parallel()
 

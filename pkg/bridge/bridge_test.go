@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,6 +65,108 @@ func fixture(t *testing.T) (*Client, *messagestore.Store, *httptest.Server) {
 	})
 
 	return client, store, httpSrv
+}
+
+// --- client URL construction -------------------------------------------------
+
+// TestClient_SessionIDEscapedInPath: a session ID containing URL
+// metacharacters must travel as a single escaped path segment. Without
+// escaping, "abc?x=1" truncates the path at the '?' and smuggles a query
+// string; '/' and "../" re-target the request; '#' drops everything
+// after it. IDs are server-generated UUIDs in practice, but the client
+// API accepts arbitrary strings.
+func TestClient_SessionIDEscapedInPath(t *testing.T) {
+	t.Parallel()
+
+	var gotPath, gotQuery string
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(raw.Close)
+
+	c, err := NewClient(ClientConfig{BaseURL: raw.URL})
+	require.NoError(t, err)
+
+	const hostile = "abc?x=1"
+	escaped := url.PathEscape(hostile)
+
+	_, err = c.DepositMessage(context.Background(), hostile, DepositRequest{
+		Role: "agent", Type: "task.completed", Content: json.RawMessage(`{"task_id":"x"}`),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, gotQuery, "deposit: session id must not smuggle a query string")
+	assert.Equal(t, "/api/sessions/"+escaped+"/messages", gotPath)
+
+	_, err = c.GetLatestMessage(context.Background(), hostile, MessageQuery{})
+	require.NoError(t, err)
+	assert.Empty(t, gotQuery, "get latest: session id must not smuggle a query string")
+	assert.Equal(t, "/api/sessions/"+escaped+"/messages/latest", gotPath)
+}
+
+// TestHandleCreateSession_InternalErrorIsOpaque: a store failure that
+// isn't the session cap must surface as 500 "internal error" — not 503
+// with raw err.Error(), which can embed driver detail and file paths.
+// Every other handler already follows this hygiene.
+func TestHandleCreateSession_InternalErrorIsOpaque(t *testing.T) {
+	t.Parallel()
+	_, store, httpSrv := fixture(t)
+	require.NoError(t, store.Close()) // force an internal failure on the next query
+
+	resp, err := http.Post(httpSrv.URL+"/api/sessions", "application/json",
+		strings.NewReader(`{"target":"t"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Contains(t, string(body), "internal error")
+	assert.NotContains(t, string(body), "database", "raw store error text must not leak")
+}
+
+// TestHandleCreateSession_CapSurfacesAsServiceUnavailable pins the one
+// expected non-internal create failure: the active-session cap keeps its
+// self-documenting message and 503 status.
+func TestHandleCreateSession_CapSurfacesAsServiceUnavailable(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "cap.db")
+	store, err := messagestore.Open(context.Background(), messagestore.Config{
+		DBPath:            dbPath,
+		MaxActiveSessions: 1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	srv := NewServer(ServerConfig{
+		Store:  store,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	post := func() *http.Response {
+		t.Helper()
+		resp, err := http.Post(httpSrv.URL+"/api/sessions", "application/json",
+			strings.NewReader(`{"target":"t"}`))
+		require.NoError(t, err)
+		return resp
+	}
+
+	first := post()
+	_ = first.Body.Close()
+	require.Equal(t, http.StatusCreated, first.StatusCode)
+
+	second := post()
+	defer second.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(second.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, second.StatusCode)
+	assert.Contains(t, string(body), "session limit",
+		"cap rejection must keep its self-documenting message")
 }
 
 // --- session lifecycle -----------------------------------------------------

@@ -14,6 +14,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -55,9 +57,21 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err != nil {
+	if code := exitCode(err); code != 0 {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(code)
+	}
+}
+
+// exitCode maps a subcommand error to a process exit status. flag's
+// ContinueOnError FlagSets return flag.ErrHelp for -h/--help after
+// printing usage — a successful help display, not an error.
+func exitCode(err error) int {
+	switch {
+	case err == nil, errors.Is(err, flag.ErrHelp):
+		return 0
+	default:
+		return 1
 	}
 }
 

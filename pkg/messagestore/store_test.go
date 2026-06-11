@@ -53,6 +53,90 @@ func newTestStore(t *testing.T) *Store {
 	return st
 }
 
+// --- Timestamp ordering ------------------------------------------------------
+
+// TestGetLatestMessage_WholeSecondBoundaryOrdering pins the core
+// persistence invariant: lexical order of stored created_at TEXT must
+// match chronological order. time.RFC3339Nano trims trailing fractional
+// zeros, so an instant landing exactly on a whole second serializes as
+// "...05Z" while one half a second LATER serializes as "...05.5Z" — and
+// '.' (0x2E) < 'Z' (0x5A) byte-wise, so the later message sorts EARLIER
+// under ORDER BY created_at DESC. Rows are inserted with the store's own
+// write format at controlled instants (the store's clock can't be
+// steered from a test).
+func TestGetLatestMessage_WholeSecondBoundaryOrdering(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	sess, err := st.CreateSession(ctx, "target", "")
+	require.NoError(t, err)
+
+	whole := time.Date(2026, 6, 11, 12, 0, 5, 0, time.UTC)
+	later := whole.Add(500 * time.Millisecond)
+
+	insert := func(senderID string, at time.Time) {
+		t.Helper()
+		_, err := st.DB().ExecContext(ctx,
+			`INSERT INTO messages (session_id, role, sender_id, type, subject_id, content, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			sess.ID, "agent", senderID, "task.completed", "subj-1", `{"task_id":"x"}`,
+			at.Format(dbTimeFormat),
+		)
+		require.NoError(t, err)
+	}
+	insert("first", whole)
+	insert("second", later)
+
+	got, err := st.GetLatestMessage(ctx, MessageFilter{SessionID: sess.ID})
+	require.NoError(t, err)
+	assert.Equal(t, "second", got.SenderID,
+		"GetLatestMessage must return the chronologically newest row")
+}
+
+// TestDBTimeFormat_LexicalOrderMatchesChronological pins the format
+// property directly across boundary deltas, plus read back-compat: rows
+// written by earlier versions used RFC3339Nano, and the scan paths parse
+// with time.RFC3339Nano — which must also accept the current format.
+func TestDBTimeFormat_LexicalOrderMatchesChronological(t *testing.T) {
+	t.Parallel()
+	whole := time.Date(2026, 6, 11, 12, 0, 5, 0, time.UTC)
+
+	for _, d := range []time.Duration{
+		time.Nanosecond,
+		500 * time.Millisecond,
+		999999999 * time.Nanosecond,
+		time.Second,
+	} {
+		earlier := whole.Format(dbTimeFormat)
+		later := whole.Add(d).Format(dbTimeFormat)
+		assert.Less(t, earlier, later,
+			"instant +%v must sort lexically after the whole second", d)
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, whole.Format(dbTimeFormat))
+	require.NoError(t, err)
+	assert.True(t, parsed.Equal(whole), "scan path must round-trip the stored format")
+}
+
+// TestCreateSession_LimitIsSentinel: callers must be able to branch on
+// the session cap with errors.Is rather than sniffing message text.
+func TestCreateSession_LimitIsSentinel(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "cap.db")
+	st, err := Open(context.Background(), Config{DBPath: dbPath, MaxActiveSessions: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	_, err = st.CreateSession(context.Background(), "one", "")
+	require.NoError(t, err)
+
+	_, err = st.CreateSession(context.Background(), "two", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrActiveSessionLimit)
+	assert.Contains(t, err.Error(), "1", "error should state the configured cap")
+}
+
 // --- Open / migration ------------------------------------------------------
 
 func TestOpen_CreatesDatabaseAndMigrates(t *testing.T) {

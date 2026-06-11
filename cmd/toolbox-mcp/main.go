@@ -61,6 +61,16 @@ const (
 )
 
 func main() {
+	// All work lives in run() so deferred cleanup (store.Close, signal
+	// release) executes on every exit path — os.Exit inside the body
+	// would skip the defers.
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	dbPath := flag.String("db", "~/.toolbox/messages.db", "path to SQLite database")
 	schemasDir := flag.String("schemas-dir", "", "directory of JSON Schema files; each <name>.json registers a MessageType named <name>")
 	allowedRoles := flag.String("allowed-roles", "", "comma-separated allowed Role values; empty means accept any role")
@@ -71,16 +81,14 @@ func main() {
 	if *logPath != "" {
 		f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // G304: operator-supplied log path
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "open log: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("open log: %w", err)
 		}
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
 	}
 
 	resolvedDB, err := expandHome(*dbPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "resolve db path: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("resolve db path: %w", err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -92,8 +100,7 @@ func main() {
 		MaxActiveSessions: *maxActive,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer store.Close() //nolint:errcheck
 
@@ -101,8 +108,7 @@ func main() {
 	// top but cannot redefine these names.
 	for _, mt := range messagetypes.Builtin() {
 		if err := store.RegisterType(mt); err != nil {
-			fmt.Fprintf(os.Stderr, "register built-in %q: %v\n", mt.Name, err)
-			os.Exit(1)
+			return fmt.Errorf("register built-in %q: %w", mt.Name, err)
 		}
 	}
 	slog.Info("registered built-in message types", "count", len(messagetypes.Builtin()))
@@ -110,8 +116,7 @@ func main() {
 	if *schemasDir != "" {
 		n, err := loadSchemasDir(store, *schemasDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "load schemas: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("load schemas: %w", err)
 		}
 		slog.Info("registered user message types", "count", n, "dir", *schemasDir)
 	}
@@ -137,10 +142,13 @@ func main() {
 		"types", len(store.RegisteredTypes()),
 		"tools", len(srv.RegisteredToolNames()))
 
-	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil {
+	// ctx cancellation is the SIGINT/SIGTERM shutdown path — a clean
+	// exit, not a failure to report.
+	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("serve", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("serve: %w", err)
 	}
+	return nil
 }
 
 // --- tools -----------------------------------------------------------------

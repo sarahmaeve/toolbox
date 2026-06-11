@@ -21,7 +21,10 @@ func validXrefOffset(n pdfNumber) (int64, bool) {
 	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0, false
 	}
-	if v < 0 || v > math.MaxInt64 {
+	// Compared as float64, math.MaxInt64 (2^63-1) rounds up to 2^63, so
+	// `v > math.MaxInt64` would accept exactly 2^63 and overflow the
+	// int64 conversion below. 1<<63 converts to float64 exactly.
+	if v < 0 || v >= 1<<63 {
 		return 0, false
 	}
 	if v != math.Trunc(v) {
@@ -208,6 +211,12 @@ func (f *pdfFile) parseClassicXref(pos int) (pdfDict, int64, error) {
 
 	for pos < len(f.data) {
 		pos = skipWhitespace(f.data, pos)
+		if pos >= len(f.data) {
+			// Trailing whitespace after the last entry with no trailer:
+			// fall through to the missing-trailer error rather than
+			// indexing past the end below.
+			break
+		}
 		if f.safeHasPrefix(pos, "trailer") {
 			break
 		}
@@ -340,6 +349,12 @@ func (f *pdfFile) readObject(num int) (any, error) {
 // readUncompressedObject parses the indirect object definition at the given
 // byte offset.
 func (f *pdfFile) readUncompressedObject(num int, off int64) (any, error) {
+	// Classic xref entries are ParseInt'd verbatim from the file (which
+	// accepts "-000000001"), and stale tables can point past EOF; bound
+	// the offset before any indexing.
+	if off < 0 || off >= int64(len(f.data)) {
+		return nil, fmt.Errorf("object %d: xref offset %d outside file bounds [0, %d)", num, off, len(f.data))
+	}
 	pos := int(off)
 	pos = skipWhitespace(f.data, pos)
 
@@ -384,7 +399,10 @@ func (f *pdfFile) readUncompressedObject(num int, off int64) (any, error) {
 		if length < 0 {
 			return nil, fmt.Errorf("negative stream length %d for object %d", length, num)
 		}
-		if pos+length > len(f.data) {
+		// Written as a subtraction: a /Length near MaxInt64 makes
+		// pos+length wrap negative and slip past a `pos+length > len`
+		// comparison into a doomed allocation.
+		if length > len(f.data)-pos {
 			return nil, fmt.Errorf("stream length %d exceeds file size for object %d", length, num)
 		}
 

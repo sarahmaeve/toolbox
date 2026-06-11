@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -109,6 +110,51 @@ func TestDecodeXrefStreamEntries_FirstWriteWins(t *testing.T) {
 	}
 	if existing[3].offset != 0xDEAD {
 		t.Errorf("existing entry overwritten: got offset 0x%X, want 0xDEAD", existing[3].offset)
+	}
+}
+
+// TestDecodeXrefStreamEntries_RejectsNegativeWidth: a hostile /W like
+// [1 -2 4] passes the all-zero check (entryLen=3) and then slices
+// data[off : off-2] — a bounds panic. Widths must be validated.
+func TestDecodeXrefStreamEntries_RejectsNegativeWidth(t *testing.T) {
+	t.Parallel()
+
+	data := make([]byte, 16)
+	into := map[int]xrefEntry{}
+
+	err := decodeXrefStreamEntries(data, [3]int{1, -2, 4}, [][2]int{{0, 1}}, into)
+	if err == nil {
+		t.Fatal("expected error for negative /W width, got nil")
+	}
+	if !strings.Contains(err.Error(), "/W") {
+		t.Errorf("error %q should name the offending /W field", err.Error())
+	}
+}
+
+// TestDecodeXrefStreamEntries_RejectsOverwideWidth: a width over 8 makes
+// readBE silently overflow its uint64 accumulator, yielding a wrong (but
+// in-range) offset instead of an error — silent corruption, the worst
+// failure mode for a parser. 8 bytes is the widest meaningful field.
+func TestDecodeXrefStreamEntries_RejectsOverwideWidth(t *testing.T) {
+	t.Parallel()
+
+	// One entry: type byte 1, then a 16-byte field2 whose high 8 bytes
+	// are nonzero and whose low 8 bytes spell offset 16. readBE's
+	// accumulator sheds the high half, so without width validation the
+	// entry decodes to a plausible — and wrong — offset with no error.
+	// (All-0xFF data would wrap to MaxUint64 and trip the int64-range
+	// check by luck; the dangerous case is the one that doesn't.)
+	data := make([]byte, 18)
+	data[0] = 1
+	for i := 1; i < 9; i++ {
+		data[i] = 0xAB // high half, silently discarded by readBE
+	}
+	data[16] = 0x10 // low half decodes to offset 16
+	into := map[int]xrefEntry{}
+
+	err := decodeXrefStreamEntries(data, [3]int{1, 16, 1}, [][2]int{{0, 1}}, into)
+	if err == nil {
+		t.Fatalf("expected error for /W width > 8, got nil (entry silently decoded as %+v)", into[0])
 	}
 }
 

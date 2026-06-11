@@ -497,6 +497,80 @@ func TestEnum_OnNonStringTypeIsIgnored(t *testing.T) {
 	assert.Nil(t, v, "enum on non-string is a no-op, not a failure")
 }
 
+// -------------------------------------------------------------------
+// String-as-number bypass.
+//
+// encoding/json unmarshals a quoted string whose content is a valid
+// numeric literal into json.Number without error (golang/go#34472), so
+// a naive json.Number round-trip lets `"42"` pass an integer schema.
+// The strict-reject contract demands a type mismatch instead.
+
+// TestValidation_Integer_RejectsQuotedNumber: the JSON string "42" must
+// not pass an integer schema.
+func TestValidation_Integer_RejectsQuotedNumber(t *testing.T) {
+	t.Parallel()
+	s, err := Parse(integerLimitSchema)
+	require.NoError(t, err)
+
+	v := s.Validate("my_tool", json.RawMessage(`{"limit": "42"}`))
+	require.NotNil(t, v, `the JSON string "42" must not pass an integer schema`)
+	assert.Contains(t, v.Message, "integer")
+	assert.Contains(t, v.Message, "string")
+	assert.Equal(t, "limit", v.Field)
+}
+
+// TestValidation_Number_RejectsQuotedNumber: the JSON string "12.5"
+// must not pass a number schema.
+func TestValidation_Number_RejectsQuotedNumber(t *testing.T) {
+	t.Parallel()
+	s, err := Parse(numericRangeSchema)
+	require.NoError(t, err)
+
+	v := s.Validate("tool", json.RawMessage(`{"percent": "12.5"}`))
+	require.NotNil(t, v, `the JSON string "12.5" must not pass a number schema`)
+	assert.Contains(t, v.Message, "number")
+	assert.Equal(t, "percent", v.Field)
+}
+
+// -------------------------------------------------------------------
+// Unknown type keywords.
+//
+// checkType's switch only recognizes the six supported types; a typo'd
+// or unsupported type must not silently disable type checking. Parse is
+// the right place to reject: registration-time callers (mcp.Register,
+// messagetypes' mustParseSchema) already treat Parse errors as fatal,
+// which is where a broken schema should die.
+
+// TestParse_RejectsUnknownTypeKeyword: a typo'd property type fails at
+// Parse time, naming both the property and the bad type.
+func TestParse_RejectsUnknownTypeKeyword(t *testing.T) {
+	t.Parallel()
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {"x": {"type": "strng"}},
+		"additionalProperties": false
+	}`)
+	_, err := Parse(raw)
+	require.Error(t, err, "a typo'd type must not parse as 'no type constraint'")
+	assert.Contains(t, err.Error(), "strng", "error must name the bad type")
+	assert.Contains(t, err.Error(), `"x"`, "error must name the property")
+}
+
+// TestParse_RejectsArrayTypeKeyword: array-of-types ({"type":
+// ["string","null"]}) is legal JSON Schema but unsupported here; it
+// must be rejected loudly rather than parsed as a constraint-free
+// property.
+func TestParse_RejectsArrayTypeKeyword(t *testing.T) {
+	t.Parallel()
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {"x": {"type": ["string", "null"]}},
+		"additionalProperties": false
+	}`)
+	_, err := Parse(raw)
+	require.Error(t, err, "array-of-types must not parse as 'no type constraint'")
+}
+
 func TestEnum_TypeErrorTakesPrecedenceOverEnum(t *testing.T) {
 	t.Parallel()
 	s, err := Parse(statusEnumSchema)

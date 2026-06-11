@@ -155,7 +155,9 @@ func (c *Client) DepositMessage(ctx context.Context, sessionID string, req Depos
 		return nil, errors.New("deposit message: session id is required")
 	}
 	var msg messagestore.Message
-	err := c.postJSON(ctx, "/api/sessions/"+sessionID+"/messages", "deposit message",
+	// PathEscape: the ID must travel as one path segment — '?', '/', '#'
+	// in a raw interpolation re-route the request.
+	err := c.postJSON(ctx, "/api/sessions/"+url.PathEscape(sessionID)+"/messages", "deposit message",
 		depositMessageRequest{
 			Role:      req.Role,
 			SenderID:  req.SenderID,
@@ -215,7 +217,7 @@ func (c *Client) GetLatestMessage(ctx context.Context, sessionID string, q Messa
 	if sessionID == "" {
 		return nil, errors.New("get latest message: session id is required (use SearchLatestMessage for cross-session)")
 	}
-	path := "/api/sessions/" + sessionID + "/messages/latest"
+	path := "/api/sessions/" + url.PathEscape(sessionID) + "/messages/latest"
 	if encoded := q.encode(); encoded != "" {
 		path += "?" + encoded
 	}

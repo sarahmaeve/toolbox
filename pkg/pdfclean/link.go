@@ -131,7 +131,11 @@ func LinkImages(markdown string, manifest map[int][]ImageRef, imgdir string) str
 func ParseManifest(r io.Reader) (map[int][]ImageRef, error) {
 	cr := csv.NewReader(bufio.NewReader(r))
 	cr.Comma = '\t'
-	cr.FieldsPerRecord = -1
+	// 0 = every row must have as many fields as the header. Extra columns
+	// remain tolerated (the header declares them; lookup is header-driven),
+	// but a short row is a csv.ErrFieldCount through the error path below
+	// instead of an index-out-of-range panic on row[col[...]].
+	cr.FieldsPerRecord = 0
 
 	header, err := cr.Read()
 	if err != nil {

@@ -91,10 +91,11 @@ func (v *Violation) Error() string { return v.Message }
 // schema keywords are silently ignored; callers that need a particular
 // keyword honored should check StrictReject and the other accessors.
 //
-// Returns an error only when raw is not a JSON object or has malformed
-// properties/required arrays — i.e., when the schema itself is
-// structurally broken. Empty input parses to an empty schema (every
-// input passes).
+// Returns an error only when the schema itself is broken: raw is not a
+// JSON object, properties/required are malformed, or a property
+// declares a type outside the supported vocabulary (which would
+// otherwise silently disable type checking for that field). Empty
+// input parses to an empty schema (every input passes).
 func Parse(raw json.RawMessage) (*Schema, error) {
 	if len(raw) == 0 {
 		return &Schema{}, nil
@@ -128,7 +129,11 @@ func Parse(raw json.RawMessage) (*Schema, error) {
 			return nil, fmt.Errorf("properties must be an object: %w", err)
 		}
 		for name, def := range propMap {
-			s.properties[name] = parseProperty(def)
+			p, err := parseProperty(name, def)
+			if err != nil {
+				return nil, err
+			}
+			s.properties[name] = p
 		}
 	}
 
@@ -146,22 +151,41 @@ func Parse(raw json.RawMessage) (*Schema, error) {
 	return s, nil
 }
 
+// knownTypes is the closed vocabulary of JSON Schema types checkType
+// can enforce, sorted for error messages.
+var knownTypes = []string{"array", "boolean", "integer", "number", "object", "string"}
+
 // parseProperty extracts the constraints we recognize from one property
-// definition. It never returns nil — an unparseable or feature-thin
-// property still round-trips as a zero-valued *property so
-// additionalProperties checks know the field is declared. Constraints
-// we don't recognize are silently ignored.
-func parseProperty(def json.RawMessage) *property {
+// definition. An unparseable or feature-thin property still round-trips
+// as a zero-valued *property so additionalProperties checks know the
+// field is declared, and constraints we don't recognize are silently
+// ignored — with one exception: a declared "type" outside knownTypes is
+// an error, because silently dropping it would disable type checking on
+// that field. Registration-time callers treat Parse errors as fatal,
+// which is exactly where a broken schema should die.
+func parseProperty(name string, def json.RawMessage) (*property, error) {
 	var raw struct {
-		Type    string          `json:"type"`
+		Type    json.RawMessage `json:"type"`
 		Minimum *json.Number    `json:"minimum"`
 		Maximum *json.Number    `json:"maximum"`
 		Enum    json.RawMessage `json:"enum"`
 	}
 	if err := json.Unmarshal(def, &raw); err != nil {
-		return &property{}
+		return &property{}, nil
 	}
-	p := &property{typ: raw.Type}
+	p := &property{}
+	if len(raw.Type) > 0 && string(raw.Type) != "null" {
+		var typ string
+		if err := json.Unmarshal(raw.Type, &typ); err != nil {
+			return nil, fmt.Errorf("property %q: type must be a string, got %s",
+				name, describeJSON(raw.Type))
+		}
+		if !slices.Contains(knownTypes, typ) {
+			return nil, fmt.Errorf("property %q: unsupported type %q; supported types: [%s]",
+				name, typ, joinFields(knownTypes))
+		}
+		p.typ = typ
+	}
 	if raw.Minimum != nil {
 		if f, err := raw.Minimum.Float64(); err == nil {
 			p.minimum = f
@@ -184,7 +208,7 @@ func parseProperty(def json.RawMessage) *property {
 			p.enum = values
 		}
 	}
-	return p
+	return p, nil
 }
 
 // StrictReject reports whether the schema had additionalProperties:false.
@@ -348,15 +372,25 @@ func checkType(declaredType string, raw json.RawMessage) error {
 			return fmt.Errorf("expected boolean, got %s", describeJSON(raw))
 		}
 	case "number":
+		// json.Number also unmarshals from a quoted string whose content
+		// is a numeric literal (golang/go#34472), so strings must be
+		// rejected by leading byte before the round-trip.
 		var v json.Number
+		if raw[0] == '"' {
+			return fmt.Errorf("expected number, got %s", describeJSON(raw))
+		}
 		if err := json.Unmarshal(raw, &v); err != nil {
 			return fmt.Errorf("expected number, got %s", describeJSON(raw))
 		}
 	case "integer":
 		// json.Number accepts both integers and floats — we have to
 		// round-trip through Int64 to reject 1.5 against an integer
-		// schema.
+		// schema. Strings are rejected by leading byte first; see the
+		// "number" case.
 		var v json.Number
+		if raw[0] == '"' {
+			return fmt.Errorf("expected integer, got %s", describeJSON(raw))
+		}
 		if err := json.Unmarshal(raw, &v); err != nil {
 			return fmt.Errorf("expected integer, got %s", describeJSON(raw))
 		}
@@ -373,6 +407,11 @@ func checkType(declaredType string, raw json.RawMessage) error {
 		if err := json.Unmarshal(raw, &v); err != nil {
 			return fmt.Errorf("expected array, got %s", describeJSON(raw))
 		}
+	default:
+		// Parse rejects unknown types, so this is unreachable through
+		// the public API — but a no-op default would silently disable
+		// type checking if the pipeline ever changes.
+		return fmt.Errorf("unsupported schema type %q", declaredType)
 	}
 	return nil
 }
