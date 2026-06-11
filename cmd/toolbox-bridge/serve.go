@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,10 +15,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
+	"github.com/sarahmaeve/toolbox/internal/schemaload"
 	"github.com/sarahmaeve/toolbox/pkg/bridge"
 	"github.com/sarahmaeve/toolbox/pkg/messagestore"
 	"github.com/sarahmaeve/toolbox/pkg/messagetypes"
-	"github.com/sarahmaeve/toolbox/pkg/schema"
 )
 
 // defaultPIDPath / defaultLogPath are the canonical locations for the
@@ -105,7 +105,7 @@ func runServeRun(args []string) error {
 		return err
 	}
 
-	resolvedDB, err := expandHome(cfg.dbPath)
+	resolvedDB, err := cliutil.ExpandHome(cfg.dbPath)
 	if err != nil {
 		return fmt.Errorf("resolve db path: %w", err)
 	}
@@ -115,7 +115,7 @@ func runServeRun(args []string) error {
 
 	store, err := messagestore.Open(ctx, messagestore.Config{
 		DBPath:            resolvedDB,
-		AllowedRoles:      splitCSV(cfg.allowedRoles),
+		AllowedRoles:      cliutil.SplitCSV(cfg.allowedRoles),
 		MaxActiveSessions: cfg.maxActive,
 	})
 	if err != nil {
@@ -136,7 +136,7 @@ func runServeRun(args []string) error {
 	slog.Info("registered built-in message types", "count", len(messagetypes.Builtin()))
 
 	if cfg.schemasDir != "" {
-		n, err := loadSchemasDir(store, cfg.schemasDir)
+		n, err := schemaload.Load(store, cfg.schemasDir)
 		if err != nil {
 			return fmt.Errorf("load schemas: %w", err)
 		}
@@ -150,13 +150,13 @@ func runServeRun(args []string) error {
 	cert, key := cfg.certFile, cfg.keyFile
 	if !cfg.noTLS {
 		if cert == "" {
-			cert, err = expandHome("~/.toolbox/certs/127.0.0.1+1.pem")
+			cert, err = cliutil.ExpandHome("~/.toolbox/certs/127.0.0.1+1.pem")
 			if err != nil {
 				return err
 			}
 		}
 		if key == "" {
-			key, err = expandHome("~/.toolbox/certs/127.0.0.1+1-key.pem")
+			key, err = cliutil.ExpandHome("~/.toolbox/certs/127.0.0.1+1-key.pem")
 			if err != nil {
 				return err
 			}
@@ -190,11 +190,11 @@ func runServeStart(args []string) error {
 		return err
 	}
 
-	resolvedPID, err := expandHome(cfg.pidPath)
+	resolvedPID, err := cliutil.ExpandHome(cfg.pidPath)
 	if err != nil {
 		return fmt.Errorf("resolve pid path: %w", err)
 	}
-	resolvedLog, err := expandHome(cfg.logPath)
+	resolvedLog, err := cliutil.ExpandHome(cfg.logPath)
 	if err != nil {
 		return fmt.Errorf("resolve log path: %w", err)
 	}
@@ -287,7 +287,7 @@ func runServeStop(args []string) error {
 		return err
 	}
 
-	resolved, err := expandHome(*pidPath)
+	resolved, err := cliutil.ExpandHome(*pidPath)
 	if err != nil {
 		return fmt.Errorf("resolve pid path: %w", err)
 	}
@@ -381,7 +381,7 @@ func runServeStatus(args []string) error {
 		return err
 	}
 
-	resolved, err := expandHome(*pidPath)
+	resolved, err := cliutil.ExpandHome(*pidPath)
 	if err != nil {
 		return err
 	}
@@ -477,77 +477,4 @@ func readPIDFile(path string) (int, error) {
 		return 0, fmt.Errorf("parse pid file %s: %w", path, err)
 	}
 	return pid, nil
-}
-
-// --- helpers shared with certs.go ------------------------------------------
-
-func splitCSV(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-func expandHome(p string) (string, error) {
-	if !strings.HasPrefix(p, "~") {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	if p == "~" {
-		return home, nil
-	}
-	if strings.HasPrefix(p, "~/") {
-		return filepath.Join(home, p[2:]), nil
-	}
-	return p, nil
-}
-
-func loadSchemasDir(store *messagestore.Store, dir string) (int, error) {
-	resolved, err := expandHome(dir)
-	if err != nil {
-		return 0, err
-	}
-	entries, err := os.ReadDir(resolved)
-	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", resolved, err)
-	}
-
-	n := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		typeName := strings.TrimSuffix(name, ".json")
-		path := filepath.Join(resolved, name)
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied schemas dir
-		if err != nil {
-			return n, fmt.Errorf("read %s: %w", path, err)
-		}
-		sch, err := schema.Parse(json.RawMessage(raw))
-		if err != nil {
-			return n, fmt.Errorf("parse %s: %w", path, err)
-		}
-		if err := store.RegisterType(messagestore.MessageType{
-			Name:   typeName,
-			Schema: sch,
-		}); err != nil {
-			return n, fmt.Errorf("register %s: %w", typeName, err)
-		}
-		n++
-	}
-	return n, nil
 }

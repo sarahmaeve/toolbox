@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
 )
 
 // ErrMkcertNotFound is returned by Init when `mkcert` is not on PATH.
@@ -43,7 +45,7 @@ func (m *Manager) Init(opts InitOptions) (*InitResult, error) {
 	if opts.Stderr == nil {
 		opts.Stderr = io.Discard
 	}
-	certDirResolved, err := expandHome(m.cfg.CertDir)
+	certDirResolved, err := cliutil.ExpandHome(m.cfg.CertDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve cert dir %q: %w", m.cfg.CertDir, err)
 	}

@@ -4,9 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
 	"github.com/sarahmaeve/toolbox/pkg/pdf"
 )
 
@@ -35,7 +34,7 @@ func runDump(args []string) error {
 		return fmt.Errorf("-page and -pages are mutually exclusive")
 	}
 
-	from, to, err := parseRange(*page, *pages)
+	from, to, err := cliutil.ParsePageRange(*page, *pages)
 	if err != nil {
 		return err
 	}
@@ -60,35 +59,4 @@ func runDump(args []string) error {
 		fmt.Println(extracted[i-1])
 	}
 	return nil
-}
-
-// parseRange returns the inclusive 1-indexed page range, or (0, 0)
-// for "all". Shared between dump and images.
-func parseRange(page int, pages string) (int, int, error) {
-	switch {
-	case page != 0:
-		if page < 1 {
-			return 0, 0, fmt.Errorf("invalid -page %d (must be >= 1)", page)
-		}
-		return page, page, nil
-	case pages != "":
-		parts := strings.SplitN(pages, "-", 2)
-		if len(parts) != 2 {
-			return 0, 0, fmt.Errorf("invalid -pages %q (expected N-M)", pages)
-		}
-		from, err := strconv.Atoi(parts[0])
-		if err != nil {
-			return 0, 0, fmt.Errorf("invalid -pages start %q: %w", parts[0], err)
-		}
-		to, err := strconv.Atoi(parts[1])
-		if err != nil {
-			return 0, 0, fmt.Errorf("invalid -pages end %q: %w", parts[1], err)
-		}
-		if from < 1 || to < from {
-			return 0, 0, fmt.Errorf("invalid -pages range %d-%d", from, to)
-		}
-		return from, to, nil
-	default:
-		return 0, 0, nil
-	}
 }

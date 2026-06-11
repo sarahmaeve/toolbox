@@ -119,6 +119,24 @@ func TestDBTimeFormat_LexicalOrderMatchesChronological(t *testing.T) {
 	assert.True(t, parsed.Equal(whole), "scan path must round-trip the stored format")
 }
 
+// TestGetLatestMessage_NoMatchIsDomainSentinel: the not-found contract
+// is a domain condition, not a database one. Returning sql.ErrNoRows
+// forced every consumer to import database/sql just to branch on a
+// miss — and contradicted ErrSessionNotFound's own rationale ("so
+// callers don't sniff driver error text").
+func TestGetLatestMessage_NoMatchIsDomainSentinel(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	sess, err := st.CreateSession(ctx, "target", "")
+	require.NoError(t, err)
+
+	_, err = st.GetLatestMessage(ctx, MessageFilter{SessionID: sess.ID})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNoMessage)
+}
+
 // TestCreateSession_LimitIsSentinel: callers must be able to branch on
 // the session cap with errors.Is rather than sniffing message text.
 func TestCreateSession_LimitIsSentinel(t *testing.T) {

@@ -23,7 +23,6 @@ package bridge
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -345,7 +344,7 @@ func (s *Server) handleGetLatestMessage(w http.ResponseWriter, r *http.Request) 
 	filter := filterFromQuery(r, r.PathValue("id"))
 	msg, err := s.store.GetLatestMessage(r.Context(), filter)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, messagestore.ErrNoMessage) {
 			writeError(w, http.StatusNotFound, "no matching message")
 			return
 		}
@@ -398,7 +397,7 @@ func (s *Server) handleSearchLatestMessage(w http.ResponseWriter, r *http.Reques
 	filter := filterFromQuery(r, "")
 	msg, err := s.store.GetLatestMessage(r.Context(), filter)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, messagestore.ErrNoMessage) {
 			writeError(w, http.StatusNotFound, "no matching message")
 			return
 		}

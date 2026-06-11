@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
 )
 
 // CheckResult is the outcome of a preflight check. Callers map OK=true
@@ -41,7 +43,7 @@ func (m *Manager) CheckWithEnv(getenv func(string) string) CheckResult {
 		}
 	}
 
-	path, err := expandHome(raw)
+	path, err := cliutil.ExpandHome(raw)
 	if err != nil {
 		return CheckResult{
 			Env:     raw,

@@ -18,6 +18,9 @@ cmd/
   toolbox-bridge/   HTTPS bridge + init/doctor/lifecycle commands
   toolbox-mcp/      MCP-over-stdio server exposing the messagestore + PDF as tools
   toolbox-pdf/      consolidated CLI for PDF dump / images / clean
+internal/
+  cliutil/          shared input helpers (~ expansion, CSV flags, page ranges)
+  schemaload/       --schemas-dir loader shared by both server binaries
 ```
 
 Each package is independently consumable. Dependencies flow downward:

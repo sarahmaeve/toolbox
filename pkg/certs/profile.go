@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
 )
 
 // WriteProfileOptions drives WriteProfile. CAPath is the value the env
@@ -47,7 +49,7 @@ func (m *Manager) WriteProfile(opts WriteProfileOptions) (*WriteProfileResult, e
 	if profilePath == "" {
 		profilePath = m.cfg.ShellProfile
 	}
-	resolved, err := expandHome(profilePath)
+	resolved, err := cliutil.ExpandHome(profilePath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve profile path %q: %w", profilePath, err)
 	}

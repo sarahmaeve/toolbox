@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
 	"github.com/sarahmaeve/toolbox/pkg/certs"
 )
 
@@ -232,7 +233,7 @@ func probeSchemasDir() probeResult {
 }
 
 func probeDaemonStatus(pidPathFlag string) probeResult {
-	resolved, err := expandHome(pidPathFlag)
+	resolved, err := cliutil.ExpandHome(pidPathFlag)
 	if err != nil {
 		return probeResult{Name: "daemon", Status: probeInfo, Message: "could not resolve pid path"}
 	}

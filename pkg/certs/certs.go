@@ -31,9 +31,8 @@ package certs
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
 )
 
 // Config configures a Manager. Pass a Config to New; defaults are
@@ -122,7 +121,7 @@ func (m *Manager) Config() Config { return m.cfg }
 // back to the system root pool) should tolerate the error by skipping
 // the load rather than aborting.
 func (m *Manager) CAPath() (string, error) {
-	return expandHome(m.cfg.CertDir + "/" + m.cfg.CAFileName)
+	return cliutil.ExpandHome(m.cfg.CertDir + "/" + m.cfg.CAFileName)
 }
 
 // FailCode classifies why Check reported NotOK. Callers use it to pick
@@ -160,24 +159,3 @@ const (
 	ProfileReplaced  ProfileAction = "replaced"
 	ProfileCreated   ProfileAction = "created"
 )
-
-// expandHome resolves a leading `~/` or bare `~` to the user's home
-// directory. Returns the input unchanged if it doesn't start with `~`.
-// Absolute paths round-trip cleanly.
-func expandHome(p string) (string, error) {
-	if !strings.HasPrefix(p, "~") {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
-	}
-	if p == "~" {
-		return home, nil
-	}
-	if strings.HasPrefix(p, "~/") {
-		return filepath.Join(home, p[2:]), nil
-	}
-	// `~otheruser/...` is not supported.
-	return p, nil
-}

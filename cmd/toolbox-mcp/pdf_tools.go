@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"os"
+	"log/slog"
 	"path/filepath"
-	"strconv"
 	"strings"
 
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
 	"github.com/sarahmaeve/toolbox/pkg/mcp"
 	"github.com/sarahmaeve/toolbox/pkg/pdf"
 	"github.com/sarahmaeve/toolbox/pkg/pdfclean"
@@ -61,7 +60,7 @@ func (pdfExtractTextTool) Handle(_ context.Context, input json.RawMessage) *mcp.
 			"page and pages are mutually exclusive", nil)
 	}
 
-	from, to, err := parsePageRange(p.Page, p.Pages)
+	from, to, err := cliutil.ParsePageRange(p.Page, p.Pages)
 	if err != nil {
 		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
 	}
@@ -177,7 +176,7 @@ func (pdfExtractImagesTool) Handle(_ context.Context, input json.RawMessage) *mc
 		return mcp.Err(mcp.CodeSchemaViolation,
 			"page and pages are mutually exclusive", nil)
 	}
-	from, to, err := parsePageRange(p.Page, p.Pages)
+	from, to, err := cliutil.ParsePageRange(p.Page, p.Pages)
 	if err != nil {
 		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
 	}
@@ -188,13 +187,7 @@ func (pdfExtractImagesTool) Handle(_ context.Context, input json.RawMessage) *mc
 	}
 
 	if from != 0 || to != 0 {
-		filtered := images[:0]
-		for _, img := range images {
-			if img.Page >= from && img.Page <= to {
-				filtered = append(filtered, img)
-			}
-		}
-		images = filtered
+		images = pdf.FilterPages(images, from, to)
 	}
 
 	stitch := true
@@ -206,14 +199,20 @@ func (pdfExtractImagesTool) Handle(_ context.Context, input json.RawMessage) *mc
 		stitchTol = p.StitchTol
 	}
 	if stitch {
-		images = stitchAdjacentImages(images, stitchTol)
-	}
-
-	if err := os.MkdirAll(p.OutDir, 0o755); err != nil { //nolint:gosec // G301: operator-supplied output dir
-		return mcp.Err(mcp.CodeInternalError, fmt.Sprintf("mkdir %s: %v", p.OutDir, err), nil)
+		images = pdf.StitchAdjacent(images, stitchTol, func(g pdf.FigureGroup, err error) {
+			// slog goes to stderr or --log — never stdout, which is the
+			// MCP protocol channel.
+			slog.Warn("stitch failed; emitting panels individually",
+				"page", g.Page, "panels", len(g.Parts), "error", err)
+		})
 	}
 
 	base := strings.TrimSuffix(filepath.Base(p.Path), filepath.Ext(p.Path))
+	manifestPath, err := pdf.WriteImagesWithManifest(p.OutDir, base, images)
+	if err != nil {
+		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
+	}
+
 	type entry struct {
 		File       string  `json:"file"`
 		Page       int     `json:"page"`
@@ -229,56 +228,13 @@ func (pdfExtractImagesTool) Handle(_ context.Context, input json.RawMessage) *mc
 		BboxH      float64 `json:"bbox_h"`
 	}
 	entries := make([]entry, 0, len(images))
-
-	manifestPath := filepath.Join(p.OutDir, "manifest.tsv")
-	mf, err := os.Create(manifestPath) //nolint:gosec // G304: operator-supplied output dir
-	if err != nil {
-		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
-	}
-	defer mf.Close() //nolint:errcheck
-	w := csv.NewWriter(mf)
-	w.Comma = '\t'
-	header := []string{
-		"file", "page", "name",
-		"width", "height", "bpc", "colorspace", "filter",
-		"bbox_x", "bbox_y", "bbox_w", "bbox_h",
-	}
-	if err := w.Write(header); err != nil {
-		return mcp.Err(mcp.CodeInternalError, fmt.Sprintf("manifest header: %v", err), nil)
-	}
 	for _, img := range images {
-		fname := fmt.Sprintf("%s-p%04d-%s.%s", base, img.Page, img.Name, img.Ext)
-		fpath := filepath.Join(p.OutDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil { //nolint:gosec // G306: operator-readable output
-			return mcp.Err(mcp.CodeInternalError, fmt.Sprintf("write %s: %v", fpath, err), nil)
-		}
-		row := []string{
-			fname,
-			strconv.Itoa(img.Page),
-			img.Name,
-			strconv.Itoa(img.Width),
-			strconv.Itoa(img.Height),
-			strconv.Itoa(img.BitsPerComponent),
-			img.ColorSpace,
-			img.Filter,
-			strconv.FormatFloat(img.BboxX, 'f', 2, 64),
-			strconv.FormatFloat(img.BboxY, 'f', 2, 64),
-			strconv.FormatFloat(img.BboxW, 'f', 2, 64),
-			strconv.FormatFloat(img.BboxH, 'f', 2, 64),
-		}
-		if err := w.Write(row); err != nil {
-			return mcp.Err(mcp.CodeInternalError, fmt.Sprintf("manifest row: %v", err), nil)
-		}
 		entries = append(entries, entry{
-			File: fname, Page: img.Page, Name: img.Name,
+			File: pdf.ImageFileName(base, img), Page: img.Page, Name: img.Name,
 			Width: img.Width, Height: img.Height, BPC: img.BitsPerComponent,
 			ColorSpace: img.ColorSpace, Filter: img.Filter,
 			BboxX: img.BboxX, BboxY: img.BboxY, BboxW: img.BboxW, BboxH: img.BboxH,
 		})
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return mcp.Err(mcp.CodeInternalError, fmt.Sprintf("manifest flush: %v", err), nil)
 	}
 
 	return mcp.OK(map[string]any{
@@ -287,27 +243,6 @@ func (pdfExtractImagesTool) Handle(_ context.Context, input json.RawMessage) *mc
 		"manifest_path": manifestPath,
 		"images":        entries,
 	})
-}
-
-// stitchAdjacentImages mirrors toolbox-pdf images' stitching path.
-func stitchAdjacentImages(images []pdf.Image, tolPt float64) []pdf.Image {
-	groups := pdf.GroupAdjacent(images, tolPt)
-	out := make([]pdf.Image, 0, len(groups))
-	for _, g := range groups {
-		if len(g.Parts) == 1 {
-			out = append(out, g.Parts[0])
-			continue
-		}
-		stitched, err := pdf.StitchGroup(g)
-		if err != nil {
-			// Best-effort: emit panels individually on stitch failure
-			// so we never lose images to a stitching bug.
-			out = append(out, g.Parts...)
-			continue
-		}
-		out = append(out, stitched)
-	}
-	return out
 }
 
 // --- pdf_clean_text --------------------------------------------------------
@@ -352,37 +287,4 @@ func (pdfCleanTextTool) Handle(_ context.Context, input json.RawMessage) *mcp.Re
 		out = pdfclean.LinkImages(out, manifest, p.Imgdir)
 	}
 	return mcp.OK(map[string]any{"text": out})
-}
-
-// --- shared helpers --------------------------------------------------------
-
-// parsePageRange validates and resolves the page/pages tool arguments
-// into an inclusive (from, to) range. (0, 0) means "all pages".
-func parsePageRange(page int, pages string) (int, int, error) {
-	switch {
-	case page != 0:
-		if page < 1 {
-			return 0, 0, fmt.Errorf("invalid page %d (must be >= 1)", page)
-		}
-		return page, page, nil
-	case pages != "":
-		parts := strings.SplitN(pages, "-", 2)
-		if len(parts) != 2 {
-			return 0, 0, fmt.Errorf("invalid pages %q (expected N-M)", pages)
-		}
-		from, err := strconv.Atoi(parts[0])
-		if err != nil {
-			return 0, 0, fmt.Errorf("invalid pages start %q: %w", parts[0], err)
-		}
-		to, err := strconv.Atoi(parts[1])
-		if err != nil {
-			return 0, 0, fmt.Errorf("invalid pages end %q: %w", parts[1], err)
-		}
-		if from < 1 || to < from {
-			return 0, 0, fmt.Errorf("invalid pages range %d-%d", from, to)
-		}
-		return from, to, nil
-	default:
-		return 0, 0, nil
-	}
 }

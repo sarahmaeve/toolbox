@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -28,14 +27,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 
+	"github.com/sarahmaeve/toolbox/internal/cliutil"
+	"github.com/sarahmaeve/toolbox/internal/schemaload"
 	"github.com/sarahmaeve/toolbox/pkg/mcp"
 	"github.com/sarahmaeve/toolbox/pkg/messagestore"
 	"github.com/sarahmaeve/toolbox/pkg/messagetypes"
-	"github.com/sarahmaeve/toolbox/pkg/schema"
 )
 
 const serverName = "toolbox-mcp"
@@ -86,7 +84,7 @@ func run() error {
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
 	}
 
-	resolvedDB, err := expandHome(*dbPath)
+	resolvedDB, err := cliutil.ExpandHome(*dbPath)
 	if err != nil {
 		return fmt.Errorf("resolve db path: %w", err)
 	}
@@ -96,7 +94,7 @@ func run() error {
 
 	store, err := messagestore.Open(ctx, messagestore.Config{
 		DBPath:            resolvedDB,
-		AllowedRoles:      splitCSV(*allowedRoles),
+		AllowedRoles:      cliutil.SplitCSV(*allowedRoles),
 		MaxActiveSessions: *maxActive,
 	})
 	if err != nil {
@@ -114,7 +112,7 @@ func run() error {
 	slog.Info("registered built-in message types", "count", len(messagetypes.Builtin()))
 
 	if *schemasDir != "" {
-		n, err := loadSchemasDir(store, *schemasDir)
+		n, err := schemaload.Load(store, *schemasDir)
 		if err != nil {
 			return fmt.Errorf("load schemas: %w", err)
 		}
@@ -437,7 +435,7 @@ func (t *getLatestMessageTool) Handle(ctx context.Context, input json.RawMessage
 		SubjectID: p.SubjectID,
 	})
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, messagestore.ErrNoMessage) {
 			return mcp.Err(mcp.CodeNotFound, "no matching message", nil)
 		}
 		if errors.Is(err, messagestore.ErrFilterRequired) {
@@ -508,79 +506,4 @@ func (t *listTasksTool) Handle(ctx context.Context, input json.RawMessage) *mcp.
 		msgs = []messagestore.Message{}
 	}
 	return mcp.OK(msgs)
-}
-
-// --- helpers ---------------------------------------------------------------
-
-// loadSchemasDir mirrors toolbox-bridge's loader. Filename stem = type
-// name; contents = JSON Schema. Strict-reject schemas only.
-func loadSchemasDir(store *messagestore.Store, dir string) (int, error) {
-	resolved, err := expandHome(dir)
-	if err != nil {
-		return 0, err
-	}
-	entries, err := os.ReadDir(resolved)
-	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", resolved, err)
-	}
-
-	n := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		typeName := strings.TrimSuffix(name, ".json")
-		path := filepath.Join(resolved, name)
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied schemas dir
-		if err != nil {
-			return n, fmt.Errorf("read %s: %w", path, err)
-		}
-		sch, err := schema.Parse(json.RawMessage(raw))
-		if err != nil {
-			return n, fmt.Errorf("parse %s: %w", path, err)
-		}
-		if err := store.RegisterType(messagestore.MessageType{
-			Name:   typeName,
-			Schema: sch,
-		}); err != nil {
-			return n, fmt.Errorf("register %s: %w", typeName, err)
-		}
-		n++
-	}
-	return n, nil
-}
-
-func splitCSV(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-func expandHome(p string) (string, error) {
-	if !strings.HasPrefix(p, "~") {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	if p == "~" {
-		return home, nil
-	}
-	if strings.HasPrefix(p, "~/") {
-		return filepath.Join(home, p[2:]), nil
-	}
-	return p, nil
 }

@@ -67,6 +67,12 @@ var (
 	// Callers (e.g. the bridge) branch on this to distinguish the one
 	// expected create failure from genuine internal errors.
 	ErrActiveSessionLimit = errors.New("active session limit reached")
+
+	// ErrNoMessage is returned by GetLatestMessage when no message
+	// matches the filter. A domain sentinel for the same reason as
+	// ErrSessionNotFound: consumers branch on a miss without importing
+	// database/sql or knowing the store is SQL-backed.
+	ErrNoMessage = errors.New("no matching message")
 )
 
 // Config configures a Store at Open.
@@ -471,7 +477,7 @@ func (s *Store) GetMessages(ctx context.Context, f MessageFilter) ([]Message, er
 }
 
 // GetLatestMessage retrieves the most recent message matching the
-// filter. Returns sql.ErrNoRows (wrapped) when no message matches;
+// filter. Returns ErrNoMessage (wrapped) when no message matches;
 // ErrFilterRequired when the filter has no dimension set.
 func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message, error) {
 	query, args, err := buildMessageQuery(f, "DESC", true)
@@ -483,7 +489,7 @@ func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message
 	msg, err := scanMessageRow(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("get latest message: %w", sql.ErrNoRows)
+			return nil, fmt.Errorf("get latest message: %w", ErrNoMessage)
 		}
 		return nil, err
 	}

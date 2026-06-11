@@ -169,6 +169,25 @@ func TestHandleCreateSession_CapSurfacesAsServiceUnavailable(t *testing.T) {
 		"cap rejection must keep its self-documenting message")
 }
 
+// TestHandleGetLatestMessage_NoMatchIs404 pins the consumer-visible
+// contract through the store's not-found sentinel change: an empty
+// result is 404 "no matching message", not a 500.
+func TestHandleGetLatestMessage_NoMatchIs404(t *testing.T) {
+	t.Parallel()
+	c, _, httpSrv := fixture(t)
+
+	sess, err := c.CreateSession(context.Background(), "t", "")
+	require.NoError(t, err)
+
+	resp, err := http.Get(httpSrv.URL + "/api/sessions/" + sess.ID + "/messages/latest")
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Contains(t, string(body), "no matching message")
+}
+
 // --- session lifecycle -----------------------------------------------------
 
 func TestClient_CreateSession_RoundTrips(t *testing.T) {
