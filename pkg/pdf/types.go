@@ -1,7 +1,7 @@
-// Package pdf implements a minimal text extractor for digital PDF documents
-// using only the Go standard library. It targets PDF 1.4 through 1.7,
-// including PDF 1.5+ features (compressed cross-reference streams and object
-// streams) commonly found in government and military publications.
+// Package pdf implements text, layout-aware Markdown, and image extraction for
+// PDF documents using only the Go standard library. Text may come from visible
+// content or an embedded OCR layer. The parser handles classic cross-reference
+// tables as well as PDF 1.5+ compressed cross-reference and object streams.
 package pdf
 
 // PDF object types. PDF values are represented as Go types:

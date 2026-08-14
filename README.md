@@ -13,6 +13,8 @@ pkg/
   bridge/           localhost HTTPS server + Go client over the messagestore
   certs/            mkcert CA bootstrap + shell profile patching
   pdf/              stdlib-only PDF 1.4–1.7 text + image extractor
+  ocr/              engine-neutral OCR model + macOS Apple Vision backend
+  pdfocr/           selective page-image to OCR pipeline and refinements
   pdfclean/         post-process extracted text into a markdown working copy
 cmd/
   toolbox-bridge/   HTTPS bridge + init/doctor/lifecycle commands
@@ -46,7 +48,7 @@ Each package is independently consumable. Dependencies flow downward:
 - **MCP server framework** with strict-reject schema validation (`additionalProperties:false`), oversize-frame recovery, race-safe lifecycle handshake, uniform `Response{Status, Data, Error, Metadata}` envelope.
 - **Pull-based coordination**: no event bus, no fan-out delivery semantics. Producers `DepositMessage`; consumers `GetLatestMessage` / `GetMessages` with optional `role` / `sender_id` / `type` / `subject_id` filters.
 - **Day-one ergonomics**: `init` bootstraps a fresh machine; `doctor` reports breadth-first on local health; `serve start/stop/restart/status` runs the bridge as a managed daemon.
-- **PDF processing**: stdlib-only PDF 1.4–1.7 parser that handles compressed cross-reference streams and object streams (common in government/military publications). Extracts text per-page and images as XObjects with bounding boxes, with optional adjacency-based panel stitching for multi-panel figures. The `pdfclean` companion turns raw extracted text into a markdown working copy.
+- **PDF processing**: stdlib-only parser for classic and modern PDFs, including compressed cross-reference streams and object streams (common in government/military publications). Extracts plain text or layout-aware Markdown per page—including embedded OCR text—and images as XObjects with bounding boxes, with optional adjacency-based panel stitching for multi-panel figures. The `pdfclean` companion turns raw extracted text into a markdown working copy.
 
 ## Default paths
 
@@ -118,7 +120,7 @@ toolbox-bridge version
 `toolbox-mcp` is stdio-only — its lifecycle is owned by the MCP client (Claude Code spawns and reaps it). See [MCP integration with Claude Code](#mcp-integration-with-claude-code) below for the recommended user-scope registration, or `.mcp.json.example` for per-project alternative wiring.
 
 ```
-toolbox-pdf dump   [-page N | -pages N-M] <file.pdf>
+toolbox-pdf dump   [-format text|markdown] [-text-source embedded|vision] [-out FILE] [-page N | -pages N-M] <file.pdf>
 toolbox-pdf images [-out DIR] [-page N | -pages N-M] [-no-stitch] [-stitch-tol PT] <file.pdf>
 toolbox-pdf clean  [-manifest path -imgdir relpath] <input.txt> <output.md>
 toolbox-pdf version
@@ -126,14 +128,39 @@ toolbox-pdf version
 
 ## PDF processing
 
-Three operations on digital PDFs (text-based, PDF 1.4–1.7, including compressed cross-reference streams and object streams). Scanned PDFs using JBIG2 are not supported — fall back to Poppler's `pdfimages` for those.
+Three operations on PDFs with content-stream or embedded OCR text, including compressed cross-reference streams and object streams. Extracting JBIG2-encoded image pixels is not supported — fall back to Poppler's `pdfimages` for those images; an embedded text layer remains extractable.
 
 ```bash
 toolbox-pdf dump my.pdf > raw.txt                           # extract text
+toolbox-pdf dump -format markdown -pages 211-230 my.pdf \
+  > pages-211-230.md                                        # selected pages only
+toolbox-pdf dump -text-source vision -page 211 \
+  -ocr-languages fr-FR,en-US -ocr-glossary terms.txt \
+  scanned.pdf > page-211.txt                                # local macOS OCR
+toolbox-pdf dump -format markdown -text-source vision \
+  -pages 209-228 -out article.md scanned.pdf                # write after OCR succeeds
 toolbox-pdf images -out ./images my.pdf                     # extract images + manifest.tsv
 toolbox-pdf clean -manifest ./images/manifest.tsv \
                   -imgdir images raw.txt clean.md           # markdown working copy
 ```
+
+`dump -page` and `dump -pages` resolve the document's page tree but decode
+content streams and fonts only for the requested pages. Markdown output uses
+the PDF's font metadata and text coordinates to retain headings, emphasis,
+superscripts, subscripts, paragraphs, and footnotes when those signals are
+encoded. It does not invent missing styles or correct text supplied by an OCR
+layer; scanned PDFs can therefore remain limited by their embedded OCR data.
+
+On macOS, `dump -text-source vision` instead recognizes the selected page
+images locally with Apple Vision. A page or range is required so an accidental
+command cannot OCR an entire book. `-ocr-glossary` accepts a UTF-8 file with
+one authoritative term per line; when Vision returns the same base letters
+without scholarly diacritics, the OCR pipeline restores the glossary spelling.
+It deliberately does not fuzzy-correct misspellings or choose between
+ambiguous glossary entries. Likely superscript citation markers are re-read in
+isolated image regions by default; disable this with
+`-ocr-refine-superscripts=false`. Vision output is currently plain text only,
+while layout-aware Markdown remains available for embedded PDF text.
 
 The same operations are exposed as MCP tools (`pdf_extract_text`, `pdf_extract_pages`, `pdf_extract_images`, `pdf_clean_text`) so a Claude Code session can drive them inline. `pdf_extract_images` writes files to disk and returns the manifest — never image bytes — so a 200-page document with hundreds of figures doesn't blow up an MCP frame.
 

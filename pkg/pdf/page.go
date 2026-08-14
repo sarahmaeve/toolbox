@@ -3,6 +3,7 @@ package pdf
 import (
 	"fmt"
 	"log"
+	"strings"
 )
 
 // maxPageTreeDepth caps page-tree recursion. Legitimate trees are shallow
@@ -80,7 +81,11 @@ func (f *pdfFile) extractPageText(ref pdfRef) (string, error) {
 		return "", fmt.Errorf("page object %d is not a dict", ref.num)
 	}
 
-	fonts := f.buildFontMaps(page)
+	pageFonts := f.buildPageFonts(page)
+	fonts := make(map[string]cmapTable, len(pageFonts))
+	for name, font := range pageFonts {
+		fonts[name] = font.cmap
+	}
 
 	content, err := f.getPageContent(page)
 	if err != nil {
@@ -90,11 +95,20 @@ func (f *pdfFile) extractPageText(ref pdfRef) (string, error) {
 	return extractText(content, fonts), nil
 }
 
-// buildFontMaps extracts ToUnicode CMaps for all fonts on a page.
-func (f *pdfFile) buildFontMaps(page pdfDict) map[string]cmapTable {
-	fonts := make(map[string]cmapTable)
+type pageFont struct {
+	cmap     cmapTable
+	baseName string
+	italic   bool
+	bold     bool
+}
 
-	resources := f.getDict(page["Resources"])
+// buildPageFonts extracts character maps and the font metadata needed by the
+// Markdown renderer. Styling is derived from PDF font metadata only; it is not
+// guessed from the text itself.
+func (f *pdfFile) buildPageFonts(page pdfDict) map[string]pageFont {
+	fonts := make(map[string]pageFont)
+
+	resources := f.getDict(f.inheritedPageValue(page, "Resources"))
 	if resources == nil {
 		return fonts
 	}
@@ -109,27 +123,62 @@ func (f *pdfFile) buildFontMaps(page pdfDict) map[string]cmapTable {
 			log.Printf("warning: font %q could not be resolved", name)
 			continue
 		}
+
+		baseName := f.getName(font["BaseFont"])
+		lowerName := strings.ToLower(baseName)
+		info := pageFont{
+			baseName: baseName,
+			italic: strings.Contains(lowerName, "italic") ||
+				strings.Contains(lowerName, "oblique"),
+			bold: strings.Contains(lowerName, "bold") ||
+				strings.Contains(lowerName, "demi") ||
+				strings.Contains(lowerName, "black"),
+		}
+		if descriptor := f.getDict(font["FontDescriptor"]); descriptor != nil {
+			if angle, ok := descriptor["ItalicAngle"].(pdfNumber); ok && angle != 0 {
+				info.italic = true
+			}
+		}
+
 		toUnicode := font["ToUnicode"]
 		if toUnicode == nil {
-			fonts[name] = f.buildEncodingMap(font)
+			info.cmap = f.buildEncodingMap(font)
+			fonts[name] = info
 			continue
 		}
 		stream, ok := f.getStream(toUnicode)
 		if !ok {
 			log.Printf("warning: font %q ToUnicode stream could not be read", name)
-			fonts[name] = f.buildEncodingMap(font)
+			info.cmap = f.buildEncodingMap(font)
+			fonts[name] = info
 			continue
 		}
 		decoded, err := f.decodeStream(*stream)
 		if err != nil {
 			log.Printf("warning: font %q ToUnicode stream decode error: %v", name, err)
-			fonts[name] = f.buildEncodingMap(font)
+			info.cmap = f.buildEncodingMap(font)
+			fonts[name] = info
 			continue
 		}
-		fonts[name] = parseCMap(decoded)
+		info.cmap = parseCMap(decoded)
+		fonts[name] = info
 	}
 
 	return fonts
+}
+
+// inheritedPageValue resolves an inheritable page-tree attribute. Resources
+// and page boxes are commonly stored once on a /Pages ancestor rather than on
+// every leaf /Page object (PDF 1.7, table 30).
+func (f *pdfFile) inheritedPageValue(page pdfDict, key string) any {
+	current := page
+	for depth := 0; current != nil && depth < maxPageTreeDepth; depth++ {
+		if value, ok := current[key]; ok {
+			return value
+		}
+		current = f.getDict(current["Parent"])
+	}
+	return nil
 }
 
 // buildEncodingMap creates a basic character map when no ToUnicode CMap is

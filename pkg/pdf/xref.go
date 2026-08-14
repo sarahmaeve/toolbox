@@ -234,7 +234,11 @@ func (f *pdfFile) parseClassicXref(pos int) (pdfDict, int64, error) {
 		if err != nil {
 			return nil, 0, fmt.Errorf("reading xref subsection count: %w", err)
 		}
-		pos = newPos
+		// PDF whitespace is permitted between the subsection count and its
+		// line ending. Canon's incremental-update writer emits "0 1 \n";
+		// starting the fixed-width entry reader on that trailing space shifts
+		// every status byte and makes the entire xref chain look empty.
+		pos = skipWhitespaceNoNewline(f.data, newPos)
 		pos = skipNewline(f.data, pos)
 
 		for i := range count {

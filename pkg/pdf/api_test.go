@@ -1,12 +1,59 @@
 package pdf
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// writeSelectiveExtractionPDF creates a three-page, classic-xref PDF. Page 2
+// deliberately uses an unsupported content-stream filter, making it a tripwire:
+// extracting page 1 or 3 succeeds only when the implementation does not decode
+// unrequested page content.
+func writeSelectiveExtractionPDF(t *testing.T) string {
+	t.Helper()
+
+	stream := func(text, extraDict string) string {
+		return fmt.Sprintf("<< /Length %d%s >>\nstream\n%s\nendstream", len(text), extraDict, text)
+	}
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
+		"<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>",
+		"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>",
+		"<< /Type /Page /Parent 2 0 R /Contents 8 0 R >>",
+		stream("BT /F0 10 Tf 1 0 0 1 20 100 Tm (Page one) Tj ET", ""),
+		stream("BT /F0 10 Tf 1 0 0 1 20 100 Tm (Page two) Tj ET", " /Filter /UnsupportedForTest"),
+		stream("BT /F0 10 Tf 1 0 0 1 20 100 Tm (Page three) Tj ET", ""),
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for i, object := range objects {
+		n := i + 1
+		offsets[n] = buf.Len()
+		fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", n, object)
+	}
+	xrefOffset := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 %d\n", len(offsets))
+	buf.WriteString("0000000000 65535 f \n")
+	for _, offset := range offsets[1:] {
+		fmt.Fprintf(&buf, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n",
+		len(offsets), xrefOffset)
+
+	path := filepath.Join(t.TempDir(), "selective.pdf")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write selective PDF: %v", err)
+	}
+	return path
+}
 
 func TestRecoverAsError_ConvertsRuntimePanicToError(t *testing.T) {
 	t.Parallel()
@@ -71,4 +118,96 @@ func TestExtractText_HostileFileDoesNotCrash(t *testing.T) {
 		}
 	}()
 	_, _ = ExtractText(path)
+}
+
+func TestExtractPages_OnlyDecodesRequestedRange(t *testing.T) {
+	t.Parallel()
+
+	path := writeSelectiveExtractionPDF(t)
+
+	pages, pageCount, err := ExtractPages(path, 1, 1)
+	if err != nil {
+		t.Fatalf("ExtractPages(1, 1): %v", err)
+	}
+	if pageCount != 3 {
+		t.Fatalf("page count: got %d, want 3", pageCount)
+	}
+	if len(pages) != 1 || strings.TrimSpace(pages[0]) != "Page one" {
+		t.Fatalf("pages: got %q, want [Page one]", pages)
+	}
+
+	pages, pageCount, err = ExtractPages(path, 3, 3)
+	if err != nil {
+		t.Fatalf("ExtractPages(3, 3): %v", err)
+	}
+	if pageCount != 3 {
+		t.Fatalf("page count: got %d, want 3", pageCount)
+	}
+	if len(pages) != 1 || strings.TrimSpace(pages[0]) != "Page three" {
+		t.Fatalf("pages: got %q, want [Page three]", pages)
+	}
+
+	if _, err := ExtractAllPages(path); err == nil {
+		t.Fatal("ExtractAllPages unexpectedly succeeded; page 2 is deliberately undecodable")
+	} else if !strings.Contains(err.Error(), "extracting page 2") {
+		t.Fatalf("ExtractAllPages error: got %q, want page 2 context", err)
+	}
+}
+
+func TestExtractPages_ReportsOutOfBoundsRange(t *testing.T) {
+	t.Parallel()
+
+	path := writeSelectiveExtractionPDF(t)
+	_, pageCount, err := ExtractPages(path, 3, 4)
+	if pageCount != 3 {
+		t.Fatalf("page count: got %d, want 3", pageCount)
+	}
+	var rangeErr *PageRangeError
+	if !errors.As(err, &rangeErr) {
+		t.Fatalf("error: got %v, want *PageRangeError", err)
+	}
+	if rangeErr.From != 3 || rangeErr.To != 4 || rangeErr.PageCount != 3 {
+		t.Fatalf("range error: got %+v, want 3-4 against 3 pages", rangeErr)
+	}
+}
+
+func TestExtractMarkdownPages_OnlyDecodesRequestedRange(t *testing.T) {
+	t.Parallel()
+
+	path := writeSelectiveExtractionPDF(t)
+	pages, pageCount, err := ExtractMarkdownPages(path, 1, 1)
+	if err != nil {
+		t.Fatalf("ExtractMarkdownPages(1, 1): %v", err)
+	}
+	if pageCount != 3 {
+		t.Fatalf("page count: got %d, want 3", pageCount)
+	}
+	if len(pages) != 1 || !strings.Contains(pages[0], "Page one") {
+		t.Fatalf("pages: got %q, want selected page-one Markdown", pages)
+	}
+}
+
+func TestExtractImagePages_ReportsPageCountAndBounds(t *testing.T) {
+	t.Parallel()
+
+	path := writeSelectiveExtractionPDF(t)
+	images, pageCount, err := ExtractImagePages(path, 3, 3)
+	if err != nil {
+		t.Fatalf("ExtractImagePages(3, 3): %v", err)
+	}
+	if pageCount != 3 {
+		t.Fatalf("page count: got %d, want 3", pageCount)
+	}
+	if len(images) != 0 {
+		t.Fatalf("images: got %d, want 0", len(images))
+	}
+
+	_, pageCount, err = ExtractImagePages(path, 3, 4)
+	if pageCount != 3 {
+		t.Fatalf("out-of-bounds page count: got %d, want 3", pageCount)
+	}
+	var rangeErr *PageRangeError
+	if !errors.As(err, &rangeErr) {
+		t.Fatalf("error: got %v, want *PageRangeError", err)
+	}
 }

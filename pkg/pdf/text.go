@@ -215,7 +215,20 @@ func (p *contentParser) writeSpace() {
 
 // writeString decodes a raw PDF string using the current font's CMap.
 func (p *contentParser) writeString(s string) {
-	cmap := p.fonts[p.currentFont]
+	mapped := decodeTextString(s, p.fonts[p.currentFont])
+	p.out.WriteString(mapped)
+	if mapped != "" {
+		r, _ := utf8.DecodeLastRuneInString(mapped)
+		p.lastRune = r
+	}
+}
+
+// decodeTextString maps the raw bytes from a PDF string through a font's
+// ToUnicode/encoding table. It is shared by the plain-text and positioned-text
+// parsers so both output modes decode characters identically.
+func decodeTextString(s string, cmap cmapTable) string {
+	var out strings.Builder
+	out.Grow(len(s))
 
 	i := 0
 	for i < len(s) {
@@ -228,11 +241,7 @@ func (p *contentParser) writeString(s string) {
 		}
 
 		if found {
-			p.out.WriteString(mapped)
-			if len(mapped) > 0 {
-				r, _ := utf8.DecodeLastRuneInString(mapped)
-				p.lastRune = r
-			}
+			out.WriteString(mapped)
 			i += 2
 			continue
 		}
@@ -242,19 +251,15 @@ func (p *contentParser) writeString(s string) {
 			mapped, found = cmap[code]
 		}
 		if found {
-			p.out.WriteString(mapped)
-			if len(mapped) > 0 {
-				r, _ := utf8.DecodeLastRuneInString(mapped)
-				p.lastRune = r
-			}
+			out.WriteString(mapped)
 		} else {
 			// Latin-1 fallback: byte value as Unicode code point.
 			r := rune(s[i])
-			p.out.WriteRune(r)
-			p.lastRune = r
+			out.WriteRune(r)
 		}
 		i++
 	}
+	return out.String()
 }
 
 // --- Tokenizer ---------------------------------------------------------------

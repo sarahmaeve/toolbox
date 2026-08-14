@@ -11,6 +11,9 @@
 # Test binary, built with `go test -c`
 *.test
 
+# Local PDF fixtures used for OCR dogfooding (not committed).
+/pkg/pdfocr/testdata/local/
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*

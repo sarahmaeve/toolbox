@@ -5,12 +5,16 @@ go 1.26
 require (
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
+	github.com/tmc/apple v0.6.15
+	golang.org/x/image v0.38.0
+	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.50.1
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

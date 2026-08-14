@@ -46,13 +46,14 @@ func runImages(args []string) error {
 		return err
 	}
 
-	images, err := pdf.ExtractImages(path)
+	var images []pdf.Image
+	if from == 0 && to == 0 {
+		images, err = pdf.ExtractImages(path)
+	} else {
+		images, _, err = pdf.ExtractImagePages(path, from, to)
+	}
 	if err != nil {
 		return err
-	}
-
-	if from != 0 || to != 0 {
-		images = pdf.FilterPages(images, from, to)
 	}
 
 	if !*noStitch {

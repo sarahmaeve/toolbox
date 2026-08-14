@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -26,21 +27,61 @@ func buildPDFTools() []mcp.Tool {
 	}
 }
 
+// extractRequestedTextPages keeps the all-pages behavior for callers that do
+// not provide a selector, while routing selected ranges through pkg/pdf's
+// selective extractor so unrequested page content streams are not decoded.
+func extractRequestedTextPages(path string, from, to int, format string) ([]string, int, error) {
+	if from == 0 && to == 0 {
+		var pages []string
+		var err error
+		if format == "markdown" {
+			pages, err = pdf.ExtractAllPagesMarkdown(path)
+		} else {
+			pages, err = pdf.ExtractAllPages(path)
+		}
+		return pages, len(pages), err
+	}
+	if format == "markdown" {
+		return pdf.ExtractMarkdownPages(path, from, to)
+	}
+	return pdf.ExtractPages(path, from, to)
+}
+
+func normalizePDFTextFormat(format string) (string, error) {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		return "text", nil
+	}
+	if format != "text" && format != "markdown" {
+		return "", fmt.Errorf("invalid format %q (expected text or markdown)", format)
+	}
+	return format, nil
+}
+
+func pdfTextExtractionError(err error) *mcp.Response {
+	var rangeErr *pdf.PageRangeError
+	if errors.As(err, &rangeErr) {
+		return mcp.Err(mcp.CodeSchemaViolation, rangeErr.Error(), nil)
+	}
+	return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
+}
+
 // --- pdf_extract_text ------------------------------------------------------
 
 type pdfExtractTextTool struct{}
 
 func (pdfExtractTextTool) Name() string { return "pdf_extract_text" }
 func (pdfExtractTextTool) Description() string {
-	return "Extract text from a digital PDF (PDF 1.4–1.7, including compressed xrefs and object streams). Concatenates all pages with form-feed separators by default; pass page or pages to narrow."
+	return "Extract text from a PDF content or embedded OCR layer. Pass page or pages to decode only the requested range; format=markdown preserves layout-derived headings, emphasis, super/subscripts, and footnotes when the PDF exposes those signals."
 }
 func (pdfExtractTextTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"path":  {"type": "string"},
-			"page":  {"type": "integer", "minimum": 1},
-			"pages": {"type": "string"}
+			"path":   {"type": "string"},
+			"page":   {"type": "integer", "minimum": 1},
+			"pages":  {"type": "string"},
+			"format": {"type": "string", "enum": ["text", "markdown"]}
 		},
 		"required": ["path"],
 		"additionalProperties": false
@@ -48,9 +89,10 @@ func (pdfExtractTextTool) InputSchema() json.RawMessage {
 }
 func (pdfExtractTextTool) Handle(_ context.Context, input json.RawMessage) *mcp.Response {
 	var p struct {
-		Path  string `json:"path"`
-		Page  int    `json:"page"`
-		Pages string `json:"pages"`
+		Path   string `json:"path"`
+		Page   int    `json:"page"`
+		Pages  string `json:"pages"`
+		Format string `json:"format"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil {
 		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
@@ -64,33 +106,42 @@ func (pdfExtractTextTool) Handle(_ context.Context, input json.RawMessage) *mcp.
 	if err != nil {
 		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
 	}
-
-	pages, err := pdf.ExtractAllPages(p.Path)
+	format, err := normalizePDFTextFormat(p.Format)
 	if err != nil {
-		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
+		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
+	}
+
+	extracted, pageCount, err := extractRequestedTextPages(p.Path, from, to, format)
+	if err != nil {
+		return pdfTextExtractionError(err)
 	}
 
 	if from == 0 && to == 0 {
-		from, to = 1, len(pages)
+		from, to = 1, pageCount
 	}
-	if from < 1 || to > len(pages) || from > to {
+	if from < 1 || to > pageCount || from > to {
 		return mcp.Err(mcp.CodeSchemaViolation,
-			fmt.Sprintf("page range %d-%d out of bounds (document has %d pages)", from, to, len(pages)),
+			fmt.Sprintf("page range %d-%d out of bounds (document has %d pages)", from, to, pageCount),
 			nil)
 	}
 
 	var sb strings.Builder
-	for i := from; i <= to; i++ {
-		if i > from {
-			sb.WriteString("\f\n")
+	for i, text := range extracted {
+		if i > 0 {
+			if format == "markdown" {
+				sb.WriteString("\n\n")
+			} else {
+				sb.WriteString("\f\n")
+			}
 		}
-		sb.WriteString(pages[i-1])
+		sb.WriteString(text)
 	}
 	return mcp.OK(map[string]any{
 		"text":       sb.String(),
-		"page_count": len(pages),
+		"page_count": pageCount,
 		"pages_from": from,
 		"pages_to":   to,
+		"format":     format,
 	})
 }
 
@@ -100,13 +151,16 @@ type pdfExtractPagesTool struct{}
 
 func (pdfExtractPagesTool) Name() string { return "pdf_extract_pages" }
 func (pdfExtractPagesTool) Description() string {
-	return "Extract text from a PDF, one entry per page, preserving page order. Use when downstream processing wants to iterate pages individually rather than treat the document as one blob."
+	return "Extract text from a PDF, one entry per page, preserving page order. Pass page or pages to limit extraction, and format=markdown for layout-aware output."
 }
 func (pdfExtractPagesTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"path": {"type": "string"}
+			"path":   {"type": "string"},
+			"page":   {"type": "integer", "minimum": 1},
+			"pages":  {"type": "string"},
+			"format": {"type": "string", "enum": ["text", "markdown"]}
 		},
 		"required": ["path"],
 		"additionalProperties": false
@@ -114,14 +168,34 @@ func (pdfExtractPagesTool) InputSchema() json.RawMessage {
 }
 func (pdfExtractPagesTool) Handle(_ context.Context, input json.RawMessage) *mcp.Response {
 	var p struct {
-		Path string `json:"path"`
+		Path   string `json:"path"`
+		Page   int    `json:"page"`
+		Pages  string `json:"pages"`
+		Format string `json:"format"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil {
 		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
 	}
-	pages, err := pdf.ExtractAllPages(p.Path)
+	if p.Page != 0 && p.Pages != "" {
+		return mcp.Err(mcp.CodeSchemaViolation,
+			"page and pages are mutually exclusive", nil)
+	}
+
+	from, to, err := cliutil.ParsePageRange(p.Page, p.Pages)
 	if err != nil {
-		return mcp.Err(mcp.CodeInternalError, err.Error(), nil)
+		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
+	}
+	format, err := normalizePDFTextFormat(p.Format)
+	if err != nil {
+		return mcp.Err(mcp.CodeSchemaViolation, err.Error(), nil)
+	}
+
+	pages, pageCount, err := extractRequestedTextPages(p.Path, from, to, format)
+	if err != nil {
+		return pdfTextExtractionError(err)
+	}
+	if from == 0 && to == 0 {
+		from = 1
 	}
 	type pageEntry struct {
 		Page int    `json:"page"`
@@ -129,11 +203,12 @@ func (pdfExtractPagesTool) Handle(_ context.Context, input json.RawMessage) *mcp
 	}
 	entries := make([]pageEntry, len(pages))
 	for i, text := range pages {
-		entries[i] = pageEntry{Page: i + 1, Text: text}
+		entries[i] = pageEntry{Page: from + i, Text: text}
 	}
 	return mcp.OK(map[string]any{
-		"page_count": len(pages),
+		"page_count": pageCount,
 		"pages":      entries,
+		"format":     format,
 	})
 }
 

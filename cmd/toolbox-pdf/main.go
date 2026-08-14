@@ -3,14 +3,14 @@
 //
 // Subcommands:
 //
-//	toolbox-pdf dump   [-page N | -pages N-M] <file.pdf>
+//	toolbox-pdf dump   [-format text|markdown] [-text-source embedded|vision] [-out FILE] [-page N | -pages N-M] <file.pdf>
 //	toolbox-pdf images [-out DIR] [-page N | -pages N-M] [-no-stitch] [-stitch-tol PT] <file.pdf>
 //	toolbox-pdf clean  [-manifest path -imgdir relpath] <input.txt> <output.md>
 //
-// Targets digital (text-based) PDFs through PDF 1.7, including
-// compressed cross-reference streams and object streams. Scanned PDFs
-// whose images use JBIG2 are logged and skipped — use Poppler's
-// `pdfimages` as a fallback for those.
+// Targets digital PDFs through PDF 1.7, including compressed cross-reference
+// streams and object streams. On macOS, selected scan-backed pages can instead
+// be recognized locally with Apple Vision. Scanned PDFs whose images use JBIG2
+// are logged and skipped — use Poppler's `pdfimages` as a fallback for those.
 package main
 
 import (
@@ -76,10 +76,10 @@ func exitCode(err error) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `toolbox-pdf — extract text and images from digital PDFs
+	fmt.Fprint(w, `toolbox-pdf — extract text and images from PDFs
 
 Usage:
-  toolbox-pdf dump   [-page N | -pages N-M] <file.pdf>
+  toolbox-pdf dump   [-format text|markdown] [-text-source embedded|vision] [-out FILE] [-page N | -pages N-M] <file.pdf>
   toolbox-pdf images [-out DIR] [-page N | -pages N-M] [-no-stitch] [-stitch-tol PT] <file.pdf>
   toolbox-pdf clean  [-manifest path -imgdir relpath] <input.txt> <output.md>
   toolbox-pdf version

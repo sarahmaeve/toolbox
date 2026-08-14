@@ -54,7 +54,7 @@ func (f *pdfFile) extractPageImages(ref pdfRef, pageNum int) ([]Image, error) {
 		return nil, fmt.Errorf("page object %d is not a dict", ref.num)
 	}
 
-	resources := f.getDict(page["Resources"])
+	resources := f.getDict(f.inheritedPageValue(page, "Resources"))
 	if resources == nil {
 		return nil, nil
 	}

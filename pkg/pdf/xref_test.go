@@ -74,6 +74,31 @@ func TestParseClassicXref_TruncatedAfterLastEntry(t *testing.T) {
 	}
 }
 
+func TestParseClassicXref_AllowsWhitespaceBeforeSubsectionNewline(t *testing.T) {
+	t.Parallel()
+
+	f := newTestPDFFile()
+	f.data = []byte("xref\n0 2 \n" +
+		"0000000000 65535 f \n" +
+		"0000000123 00000 n \n" +
+		"trailer\n<< /Size 2 /Root 1 0 R >>")
+
+	trailer, _, err := f.parseClassicXref(0)
+	if err != nil {
+		t.Fatalf("parseClassicXref: %v", err)
+	}
+	if _, ok := trailer["Root"].(pdfRef); !ok {
+		t.Fatalf("trailer Root: got %#v, want pdfRef", trailer["Root"])
+	}
+	entry, ok := f.xref[1]
+	if !ok {
+		t.Fatal("xref entry 1 missing")
+	}
+	if entry.kind != xrefUncompressed || entry.offset != 123 {
+		t.Fatalf("xref entry 1: got %#v, want uncompressed offset 123", entry)
+	}
+}
+
 // TestReadUncompressedObject_RejectsStreamLengthOverflow: a /Length close
 // to MaxInt64 makes the naive `pos+length > len(data)` bounds check wrap
 // negative once pos exceeds the gap, bypassing it into a doomed
